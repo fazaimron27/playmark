@@ -5,6 +5,7 @@ defmodule Playmark.QueueItem do
   schema "queue_items" do
     field(:title, :string)
     field(:url, :string)
+    field(:author, :string)
     field(:local, :boolean, default: false)
     field(:position, :integer)
 
@@ -14,7 +15,7 @@ defmodule Playmark.QueueItem do
   @doc false
   def changeset(queue_item, attrs) do
     queue_item
-    |> cast(attrs, [:title, :url, :local, :position])
+    |> cast(attrs, [:title, :url, :author, :local, :position])
     |> validate_required([:title, :url, :position])
   end
 end
