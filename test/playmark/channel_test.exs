@@ -58,38 +58,39 @@ defmodule Playmark.ChannelTest do
       end)
     end
 
-    test "replaces flat titles with oEmbed (original-language) titles" do
+    test "replaces flat titles with oEmbed (original-language) titles and sets author" do
       videos = [
         %{id: "a", title: "The Mystery of Ancient Religions", url: "https://youtu.be/a"},
         %{id: "b", title: "Is Netanyahu the Last Leader?", url: "https://youtu.be/b"}
       ]
 
       StubMetadata.set(%{
-        "https://youtu.be/a" => {:ok, %{title: "Misteri Agama Kuno di Al-Qur'an", channel: "C"}},
+        "https://youtu.be/a" =>
+          {:ok, %{title: "Misteri Agama Kuno di Al-Qur'an", channel: "Chan A"}},
         "https://youtu.be/b" =>
-          {:ok, %{title: "Benarkah Netanyahu Pemimpin Terakhir Israel?", channel: "C"}}
+          {:ok, %{title: "Benarkah Netanyahu Pemimpin Terakhir Israel?", channel: "Chan B"}}
       })
 
       assert [
-               %{id: "a", title: "Misteri Agama Kuno di Al-Qur'an"},
-               %{id: "b", title: "Benarkah Netanyahu Pemimpin Terakhir Israel?"}
+               %{id: "a", title: "Misteri Agama Kuno di Al-Qur'an", author: "Chan A"},
+               %{id: "b", title: "Benarkah Netanyahu Pemimpin Terakhir Israel?", author: "Chan B"}
              ] = Channel.enrich_titles(videos)
     end
 
-    test "keeps the flat title when oEmbed fails for a video (no drops)" do
+    test "keeps the flat title and sets a nil author when oEmbed fails (no drops)" do
       videos = [
         %{id: "a", title: "Flat A", url: "https://youtu.be/a"},
         %{id: "b", title: "Flat B", url: "https://youtu.be/b"}
       ]
 
       StubMetadata.set(%{
-        "https://youtu.be/a" => {:ok, %{title: "Original A", channel: "C"}},
+        "https://youtu.be/a" => {:ok, %{title: "Original A", channel: "Chan A"}},
         "https://youtu.be/b" => {:error, "boom"}
       })
 
       assert [
-               %{id: "a", title: "Original A"},
-               %{id: "b", title: "Flat B"}
+               %{id: "a", title: "Original A", author: "Chan A"},
+               %{id: "b", title: "Flat B", author: nil}
              ] = Channel.enrich_titles(videos)
     end
 
@@ -124,11 +125,14 @@ defmodule Playmark.ChannelTest do
       Playmark.Cache.sync()
 
       # Now make every oEmbed lookup fail. If the second pass still yields the
-      # original titles, they came from the cache rather than the network — a
-      # cache miss here would fall back to the flat titles.
+      # original titles and authors, they came from the cache rather than the
+      # network — a cache miss here would fall back to the flat titles / nil author.
       StubMetadata.set(%{})
 
-      assert [%{title: "Original A"}, %{title: "Original B"}] = Channel.enrich_titles(videos)
+      assert [
+               %{title: "Original A", author: "C"},
+               %{title: "Original B", author: "C"}
+             ] = Channel.enrich_titles(videos)
     end
   end
 end

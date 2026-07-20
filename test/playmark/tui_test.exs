@@ -1,6 +1,6 @@
 defmodule Playmark.TUITest.TestPlayback do
   @moduledoc """
-  A stub player for the TUI's playback seam. `play/2` reports the `:playing`
+  A stub player for the TUI's playback seam. `play/3` reports the `:playing`
   stage through the progress reporter (mirroring a real backend), tells the test
   process the task has started (handing it the task pid), then blocks until
   released with `:close`, modelling a real player that stays open until the user
@@ -12,11 +12,14 @@ defmodule Playmark.TUITest.TestPlayback do
 
   def subtitles?, do: false
 
-  def play(_url, progress), do: announce_and_block(progress)
+  # The TUI passes a display meta map (%{title, author}) as the middle arg (see
+  # start_play); the stub ignores it and behaves like a real backend advancing
+  # to :playing.
+  def play(_url, _meta, progress), do: announce_and_block(progress)
 
-  # Local playback goes through play_local/2 instead of play/2; behave the same
+  # Local playback goes through play_local/3 instead of play/3; behave the same
   # so a test can observe the non-blocking :playing state for a local file too.
-  def play_local(_path, progress), do: announce_and_block(progress)
+  def play_local(_path, _meta, progress), do: announce_and_block(progress)
 
   defp announce_and_block(progress) do
     progress.(:playing)
