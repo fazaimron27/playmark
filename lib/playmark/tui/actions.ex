@@ -193,6 +193,14 @@ defmodule Playmark.TUI.Actions do
     Enum.at(current_list(state), state.selected)
   end
 
+  # The channel name for an item, fed to the player as artist metadata. Its key
+  # differs by source: a bookmark stores `:channel`, an enriched channel/search
+  # video carries `:author`, and a local file has neither. `nil` when absent — the
+  # player then sets no artist flag.
+  defp item_author(item) do
+    Map.get(item, :author) || Map.get(item, :channel)
+  end
+
   # --- queue ---------------------------------------------------------------
 
   # Append the selected item to the playback queue, carrying the local? flag the
@@ -204,7 +212,12 @@ defmodule Playmark.TUI.Actions do
         state
 
       item ->
-        attrs = %{title: item.title, url: item.url, local: state.view == :local}
+        attrs = %{
+          title: item.title,
+          url: item.url,
+          local: state.view == :local,
+          author: item_author(item)
+        }
 
         case Queue.enqueue(attrs) do
           {:ok, _} ->
@@ -313,7 +326,7 @@ defmodule Playmark.TUI.Actions do
         %{state | status: {:error, "Queue is empty"}}
 
       item ->
-        playable = %{title: item.title, url: item.url, local: item.local}
+        playable = %{title: item.title, url: item.url, local: item.local, author: item.author}
         start_play(playable, :queue, state, item.id)
     end
   end
@@ -330,7 +343,13 @@ defmodule Playmark.TUI.Actions do
         # everything else is a YouTube URL that may need stream resolution first.
         # For a direct Enter the active view decides; a queue entry carries its
         # own flag (see start_play/3 and start_queue).
-        playable = %{title: item.title, url: item.url, local: state.view == :local}
+        playable = %{
+          title: item.title,
+          url: item.url,
+          local: state.view == :local,
+          author: item_author(item)
+        }
+
         start_play(playable, :list, state)
     end
   end
@@ -347,24 +366,31 @@ defmodule Playmark.TUI.Actions do
   # `steps` below and `Playmark.TUI.View`). The reporter is dropped by a mode guard
   # in handle_info once we leave :playing, mirroring the other async operations.
   #
-  # `playable` is a `%{title, url, local}` map — the source-agnostic unit both a
-  # direct Enter and the queue feed in. `origin` (`:list` / `:queue`) tells the
-  # `:play_result` handler where to go when the player closes: back to the list,
-  # or on to the next queued item (`playing.queue_id` names the item to drop).
-  # This is the ONLY playback spawn; the queue never runs two players at once —
-  # the next only starts after this one's `:play_result` arrives (see Playmark.TUI).
+  # `playable` is a `%{title, url, local, author}` map — the source-agnostic unit
+  # both a direct Enter and the queue feed in. `origin` (`:list` / `:queue`) tells
+  # the `:play_result` handler where to go when the player closes: back to the
+  # list, or on to the next queued item (`playing.queue_id` names the item to
+  # drop). This is the ONLY playback spawn; the queue never runs two players at
+  # once — the next only starts after this one's `:play_result` arrives (see
+  # Playmark.TUI).
   def start_play(playable, origin, state, queue_id \\ nil) do
     parent = self()
     play = playback()
     player = play.player()
     local? = playable.local
     url = playable.url
+    # Title + channel handed to the player as display metadata so it shows them
+    # instead of "unknown title / unknown artist" (author is best-effort; nil for
+    # local files or a failed oEmbed lookup — the backend then omits the flag).
+    meta = %{title: playable.title, author: Map.get(playable, :author)}
     progress = fn stage -> send(parent, {:play_progress, stage}) end
 
     Task.start(fn ->
       result =
         try do
-          if local?, do: play.play_local(url, progress), else: play.play(url, progress)
+          if local?,
+            do: play.play_local(url, meta, progress),
+            else: play.play(url, meta, progress)
         rescue
           error -> {:error, Exception.message(error)}
         end
