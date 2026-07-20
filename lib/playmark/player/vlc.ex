@@ -54,7 +54,7 @@ defmodule Playmark.Player.Vlc do
 
       try do
         Playback.report(opts, :playing)
-        launch(urls, sub_file)
+        launch(urls, sub_file, opts)
       after
         Captions.cleanup(sub_file)
       end
@@ -64,7 +64,7 @@ defmodule Playmark.Player.Vlc do
   @impl true
   def play_local(path, opts) when is_binary(path) do
     Playback.report(opts, :playing)
-    launch([path], nil)
+    launch([path], nil, opts)
   end
 
   @doc """
@@ -113,17 +113,17 @@ defmodule Playmark.Player.Vlc do
 
   # --- launch --------------------------------------------------------------
 
-  defp launch(urls, sub_file) do
-    Playback.run(executable(), launch_args(urls, sub_file))
+  defp launch(urls, sub_file, opts) do
+    Playback.run(executable(), launch_args(urls, sub_file, opts))
   end
 
   @doc """
   The VLC argument list for `urls` (one muxed URL, or video + audio) plus an
-  optional subtitle `sub_file`. Exposed for testing so the constructed flags can
-  be asserted without launching VLC.
+  optional subtitle `sub_file`, under `opts`. Exposed for testing so the
+  constructed flags can be asserted without launching VLC.
   """
-  def launch_args(urls, sub_file) do
-    vlc_args(urls) ++ sub_args(sub_file)
+  def launch_args(urls, sub_file, opts) do
+    vlc_args(urls) ++ sub_args(sub_file) ++ meta_args(opts)
   end
 
   # Single muxed stream, or a split rendition with audio attached as a slave.
@@ -134,4 +134,24 @@ defmodule Playmark.Player.Vlc do
 
   defp sub_args(nil), do: []
   defp sub_args(sub_file), do: ["--sub-file=#{sub_file}"]
+
+  # A pre-resolved HLS stream carries no metadata, so VLC shows "unknown title /
+  # unknown artist" (including in its MPRIS desktop-media entry) unless we set it.
+  # --meta-title / --meta-artist scope to the played input; the channel becomes the
+  # artist. Each flag is omitted when its value is unknown (nil/blank). Note this is
+  # distinct from --no-video-title-show above, which only suppresses the transient
+  # on-video filename overlay.
+  defp meta_args(opts) do
+    meta_arg("--meta-title", Map.get(opts, :title)) ++
+      meta_arg("--meta-artist", Map.get(opts, :author))
+  end
+
+  defp meta_arg(_flag, value) when not is_binary(value), do: []
+
+  defp meta_arg(flag, value) do
+    case String.trim(value) do
+      "" -> []
+      trimmed -> ["#{flag}=#{trimmed}"]
+    end
+  end
 end
