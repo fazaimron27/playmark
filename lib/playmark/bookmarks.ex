@@ -5,7 +5,7 @@ defmodule Playmark.Bookmarks do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{Bookmark, Metadata, Repo}
+  alias Playmark.{Bookmark, Metadata, Repo, YouTube}
 
   @doc """
   Lists all bookmarks, newest first.
@@ -17,12 +17,15 @@ defmodule Playmark.Bookmarks do
   @doc """
   Fetches metadata for the given YouTube URL and stores a bookmark.
 
-  Returns `{:ok, bookmark}` or `{:error, reason}`.
+  The URL is validated as a YouTube video URL before any network call, so an
+  empty field or a non-YouTube paste fails instantly rather than after a slow
+  oEmbed round-trip. Returns `{:ok, bookmark}` or `{:error, reason}`.
   """
   def add_bookmark(url) when is_binary(url) do
     url = String.trim(url)
 
-    with {:ok, %{title: title, channel: channel}} <- Metadata.fetch(url) do
+    with {:ok, _} <- YouTube.validate(url),
+         {:ok, %{title: title, channel: channel}} <- Metadata.fetch(url) do
       %Bookmark{}
       |> Bookmark.changeset(%{url: url, title: title, channel: channel})
       |> Repo.insert()
