@@ -68,7 +68,7 @@ defmodule Playmark.Playback do
   Returns `:ok` on success or `{:error, reason}`. Blocks for the duration of
   playback.
   """
-  def play(url) when is_binary(url), do: play(url, player(), &no_op/1)
+  def play(url) when is_binary(url), do: play(url, player(), nil, &no_op/1)
 
   @doc """
   Plays `url`, reporting progress through `progress` — a 1-arity function called
@@ -80,17 +80,38 @@ defmodule Playmark.Playback do
   options always come from config.
   """
   def play(url, progress) when is_binary(url) and is_function(progress, 1),
-    do: play(url, player(), progress)
+    do: play(url, player(), nil, progress)
 
   def play(url, player) when is_binary(url) and is_atom(player),
-    do: play(url, player, &no_op/1)
+    do: play(url, player, nil, &no_op/1)
 
   @doc """
-  Plays `url` in an explicit `player`, reporting stages through `progress`.
+  Plays `url` with display `meta` (a `%{title, author}` map handed to the player
+  so it shows the video name / channel instead of "unknown title / unknown
+  artist"), reporting stages through `progress`. `meta` may be `nil` when unknown,
+  and either field within it may be `nil`. This is the form the TUI uses.
   """
-  def play(url, :mpv, progress) when is_binary(url), do: Player.Mpv.play(url, opts(progress))
-  def play(url, :vlc, progress) when is_binary(url), do: Player.Vlc.play(url, opts(progress))
+  def play(url, meta, progress)
+      when is_binary(url) and (is_map(meta) or is_nil(meta)) and is_function(progress, 1),
+      do: play(url, player(), meta, progress)
+
+  # Explicit-player form without meta (defaults to nil). Same play/3 arity as the
+  # meta form above; the atom second arg is what distinguishes it.
+  def play(url, :mpv, progress) when is_binary(url), do: play(url, :mpv, nil, progress)
+  def play(url, :vlc, progress) when is_binary(url), do: play(url, :vlc, nil, progress)
   def play(_url, other, _progress), do: {:error, "unsupported player: #{inspect(other)}"}
+
+  @doc """
+  Plays `url` in an explicit `player` with display `meta` and a progress reporter.
+  """
+  def play(url, :mpv, meta, progress) when is_binary(url),
+    do: Player.Mpv.play(url, opts(meta, progress))
+
+  def play(url, :vlc, meta, progress) when is_binary(url),
+    do: Player.Vlc.play(url, opts(meta, progress))
+
+  def play(_url, other, _meta, _progress),
+    do: {:error, "unsupported player: #{inspect(other)}"}
 
   @doc """
   Plays a local media file `path` in the configured player.
@@ -100,28 +121,47 @@ defmodule Playmark.Playback do
   straight to the player. Returns `:ok` or `{:error, reason}` and blocks for the
   duration of playback.
   """
-  def play_local(path) when is_binary(path), do: play_local(path, player(), &no_op/1)
+  def play_local(path) when is_binary(path), do: play_local(path, player(), nil, &no_op/1)
 
   @doc """
   Plays local `path`, reporting progress through `progress`, or in an explicit
   `player`. Mirrors `play/2`'s two arities.
   """
   def play_local(path, progress) when is_binary(path) and is_function(progress, 1),
-    do: play_local(path, player(), progress)
+    do: play_local(path, player(), nil, progress)
 
   def play_local(path, player) when is_binary(path) and is_atom(player),
-    do: play_local(path, player, &no_op/1)
+    do: play_local(path, player, nil, &no_op/1)
 
   @doc """
-  Plays local `path` in an explicit `player`, reporting stages through `progress`.
+  Plays local `path` with display `meta` and a progress reporter. The form the
+  TUI uses; `meta` (and either field within it) may be `nil`.
   """
+  def play_local(path, meta, progress)
+      when is_binary(path) and (is_map(meta) or is_nil(meta)) and is_function(progress, 1),
+      do: play_local(path, player(), meta, progress)
+
+  # Explicit-player form without meta (defaults to nil). Same play_local/3 arity
+  # as the meta form above; the atom second arg distinguishes it.
   def play_local(path, :mpv, progress) when is_binary(path),
-    do: Player.Mpv.play_local(path, opts(progress))
+    do: play_local(path, :mpv, nil, progress)
 
   def play_local(path, :vlc, progress) when is_binary(path),
-    do: Player.Vlc.play_local(path, opts(progress))
+    do: play_local(path, :vlc, nil, progress)
 
   def play_local(_path, other, _progress), do: {:error, "unsupported player: #{inspect(other)}"}
+
+  @doc """
+  Plays local `path` in an explicit `player` with display `meta` and a reporter.
+  """
+  def play_local(path, :mpv, meta, progress) when is_binary(path),
+    do: Player.Mpv.play_local(path, opts(meta, progress))
+
+  def play_local(path, :vlc, meta, progress) when is_binary(path),
+    do: Player.Vlc.play_local(path, opts(meta, progress))
+
+  def play_local(_path, other, _meta, _progress),
+    do: {:error, "unsupported player: #{inspect(other)}"}
 
   @doc """
   The configured player (`:mpv` by default).
@@ -210,8 +250,10 @@ defmodule Playmark.Playback do
   # The resolved options handed to a player backend, built from config once per
   # play call so backends never read application env themselves. `progress` is a
   # 1-arity reporter the backend calls with a stage atom as it advances; it
-  # defaults to a no-op so backends may call it unconditionally.
-  defp opts(progress) do
+  # defaults to a no-op so backends may call it unconditionally. `meta` is a
+  # `%{title, author}` display map (or nil); each field flows to a player flag
+  # (nil when unknown — the backend then adds no flag for it).
+  defp opts(meta, progress) do
     %{
       format: format(),
       subtitles?: subtitles?(),
@@ -219,9 +261,16 @@ defmodule Playmark.Playback do
       subtitle_fallback: subtitle_fallback(),
       player_client: @player_client,
       subtitle_client: @subtitle_client,
-      progress: progress
+      progress: progress,
+      title: meta_field(meta, :title),
+      author: meta_field(meta, :author)
     }
   end
+
+  # A field from the optional display-meta map: nil when there's no map or the
+  # key is absent, so a caller may pass a partial map (or none at all).
+  defp meta_field(nil, _key), do: nil
+  defp meta_field(meta, key) when is_map(meta), do: Map.get(meta, key)
 
   defp no_op(_stage), do: :ok
 end

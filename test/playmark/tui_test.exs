@@ -1,6 +1,6 @@
 defmodule Playmark.TUITest.TestPlayback do
   @moduledoc """
-  A stub player for the TUI's playback seam. `play/2` reports the `:playing`
+  A stub player for the TUI's playback seam. `play/3` reports the `:playing`
   stage through the progress reporter (mirroring a real backend), tells the test
   process the task has started (handing it the task pid), then blocks until
   released with `:close`, modelling a real player that stays open until the user
@@ -12,11 +12,14 @@ defmodule Playmark.TUITest.TestPlayback do
 
   def subtitles?, do: false
 
-  def play(_url, progress), do: announce_and_block(progress)
+  # The TUI passes a display meta map (%{title, author}) as the middle arg (see
+  # start_play); the stub ignores it and behaves like a real backend advancing
+  # to :playing.
+  def play(_url, _meta, progress), do: announce_and_block(progress)
 
-  # Local playback goes through play_local/2 instead of play/2; behave the same
+  # Local playback goes through play_local/3 instead of play/3; behave the same
   # so a test can observe the non-blocking :playing state for a local file too.
-  def play_local(_path, progress), do: announce_and_block(progress)
+  def play_local(_path, _meta, progress), do: announce_and_block(progress)
 
   defp announce_and_block(progress) do
     progress.(:playing)
@@ -164,6 +167,104 @@ defmodule Playmark.TUITest do
     assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
   end
 
+  describe "status auto-clear" do
+    test "a set status arms a one-shot clear timer carrying that status" do
+      assert [%ExRatatui.Subscription{} = sub] =
+               TUI.subscriptions(%{status: {:info, "Added: Foo"}})
+
+      assert sub.id == :status_clear
+      assert sub.kind == :once
+      assert sub.message == {:clear_status, {:info, "Added: Foo"}}
+    end
+
+    test "a nil status arms no timer" do
+      assert TUI.subscriptions(%{status: nil}) == []
+    end
+
+    test "the clear tick blanks the status it was armed for" do
+      status = {:info, "Added: Foo"}
+      pid = start_tui()
+      :sys.replace_state(pid, fn s -> %{s | user_state: %{s.user_state | status: status}} end)
+
+      send(pid, {:clear_status, status})
+      _ = :sys.get_state(pid)
+
+      assert user_state(pid).status == nil
+    end
+
+    test "a clear tick for a stale status leaves a newer one intact" do
+      pid = start_tui()
+      newer = {:error, "Something else"}
+      :sys.replace_state(pid, fn s -> %{s | user_state: %{s.user_state | status: newer}} end)
+
+      # A tick armed for an earlier status arrives late; it must not wipe `newer`.
+      send(pid, {:clear_status, {:info, "Added: Foo"}})
+      _ = :sys.get_state(pid)
+
+      assert user_state(pid).status == newer
+    end
+  end
+
+  describe "delete confirmation" do
+    test "d stages a confirmation instead of deleting immediately" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/x", title: "Keeper", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "d")
+
+      state = user_state(pid)
+      assert state.mode == :confirm
+      # Nothing deleted yet — the row is still there.
+      assert length(state.bookmarks) == 1
+    end
+
+    test "y confirms the delete and returns to list mode" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/x", title: "Doomed", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "d")
+      press(pid, "y")
+
+      state = user_state(pid)
+      assert state.mode == :list
+      assert state.bookmarks == []
+      assert {:info, "Deleted"} = state.status
+    end
+
+    test "n cancels the delete, leaving the item intact" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/x", title: "Keeper", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "d")
+      press(pid, "n")
+
+      state = user_state(pid)
+      assert state.mode == :list
+      assert length(state.bookmarks) == 1
+      assert {:info, "Canceled"} = state.status
+    end
+
+    test "any non-y key cancels the delete" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/x", title: "Keeper", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "d")
+      press(pid, "esc")
+
+      state = user_state(pid)
+      assert state.mode == :list
+      assert length(state.bookmarks) == 1
+    end
+
+    test "d with an empty list is a no-op (no confirmation staged)" do
+      pid = start_tui()
+
+      press(pid, "d")
+
+      assert user_state(pid).mode == :list
+    end
+  end
+
   describe "add-bookmark flow" do
     test "\"a\" enters input mode and typing updates the field" do
       pid = start_tui()
@@ -290,6 +391,42 @@ defmodule Playmark.TUITest do
       state = user_state(pid)
       assert state.mode == :input
       assert {:error, "video unavailable"} = state.status
+    end
+
+    test "a duplicate bookmark shows a friendly message, not raw Ecto text" do
+      pid = start_tui()
+      :sys.replace_state(pid, fn s -> %{s | user_state: %{s.user_state | mode: :fetching}} end)
+
+      send(pid, {:add_result, {:error, duplicate_bookmark_changeset()}})
+      _ = :sys.get_state(pid)
+
+      state = user_state(pid)
+      assert state.mode == :input
+      assert {:error, "Already bookmarked"} = state.status
+    end
+
+    test "a duplicate subscription shows a channel-specific message" do
+      pid = start_tui()
+      :sys.replace_state(pid, fn s -> %{s | user_state: %{s.user_state | mode: :fetching}} end)
+
+      send(pid, {:add_result, {:error, duplicate_subscription_changeset()}, :subscription})
+      _ = :sys.get_state(pid)
+
+      state = user_state(pid)
+      assert state.mode == :input
+      assert {:error, "Already subscribed to this channel"} = state.status
+    end
+
+    test "a duplicate local directory shows a directory-specific message" do
+      pid = start_tui()
+      :sys.replace_state(pid, fn s -> %{s | user_state: %{s.user_state | mode: :fetching}} end)
+
+      send(pid, {:add_result, {:error, duplicate_playlist_changeset()}, :playlist})
+      _ = :sys.get_state(pid)
+
+      state = user_state(pid)
+      assert state.mode == :input
+      assert {:error, "Directory already registered"} = state.status
     end
   end
 
@@ -1235,15 +1372,37 @@ defmodule Playmark.TUITest do
       assert state.queue_selected == 0
     end
 
-    test "c clears the queue" do
+    test "c clears the queue after confirmation" do
       {:ok, _} = Queue.enqueue(%{title: "A", url: "u-a", local: false})
       pid = start_tui()
       press(pid, "Q")
       press(pid, "c")
 
+      # "c" stages a confirmation rather than clearing outright; the queue is
+      # untouched until the user presses "y".
+      staged = user_state(pid)
+      assert staged.mode == :confirm
+      assert length(staged.queue) == 1
+
+      press(pid, "y")
+
       state = user_state(pid)
+      assert state.mode == :queue_manage
       assert state.queue == []
       assert {:info, "Queue cleared"} = state.status
+    end
+
+    test "c then a non-y key cancels the clear, leaving the queue intact" do
+      {:ok, _} = Queue.enqueue(%{title: "A", url: "u-a", local: false})
+      pid = start_tui()
+      press(pid, "Q")
+      press(pid, "c")
+      press(pid, "n")
+
+      state = user_state(pid)
+      assert state.mode == :queue_manage
+      assert length(state.queue) == 1
+      assert {:info, "Canceled"} = state.status
     end
 
     test "Enter in the modal starts playback from the head with origin :queue" do
@@ -1381,11 +1540,65 @@ defmodule Playmark.TUITest do
     end
   end
 
+  describe "footer error rendering" do
+    # A yt-dlp/player failure can carry raw multi-line stderr. The footer is a
+    # single 3-row strip, so the message is collapsed to its first non-blank line
+    # and length-capped rather than wrapping unreadably.
+    defp footer_state(status) do
+      %{
+        view: :bookmarks,
+        mode: :list,
+        bookmarks: [],
+        subscriptions: [],
+        playlists: [],
+        queue: [],
+        videos: [],
+        channel_name: nil,
+        selected: 0,
+        queue_selected: 0,
+        queue_return: :list,
+        input: nil,
+        status: status,
+        playing: nil
+      }
+    end
+
+    test "a multi-line error is collapsed to its first non-blank line" do
+      state = footer_state({:error, "\nyt-dlp failed (exit 1)\nERROR: something\nmore detail"})
+
+      text = footer_text(TUI.render(state, frame()))
+      assert text == "yt-dlp failed (exit 1)"
+      refute text =~ "\n"
+    end
+
+    test "a very long error line is truncated with an ellipsis" do
+      long = String.duplicate("x", 500)
+      state = footer_state({:error, long})
+
+      text = footer_text(TUI.render(state, frame()))
+      assert String.length(text) <= 120
+      assert String.ends_with?(text, "…")
+    end
+
+    test "a short single-line error passes through unchanged" do
+      state = footer_state({:error, "Queue is empty"})
+
+      assert footer_text(TUI.render(state, frame())) == "Queue is empty"
+    end
+  end
+
   defp frame, do: %ExRatatui.Frame{width: 80, height: 24}
 
   # The body is the second widget in the render list (header, body, footer).
   defp body_text(widgets) do
     {widget, _rect} = Enum.at(widgets, 1)
+    Map.get(widget, :text)
+  end
+
+  # The footer is the last widget in the render list (header, body, footer), or
+  # (header, body, input, footer) while adding.
+  defp footer_text(widgets) do
+    {widget, _rect} = List.last(widgets)
     Map.get(widget, :text)
   end
 
@@ -1397,5 +1610,45 @@ defmodule Playmark.TUITest do
         title = Map.get(block, :title),
         is_binary(title),
         do: title
+  end
+
+  # Real unique-constraint error changesets: insert a row, then attempt a
+  # duplicate so the returned changeset carries the actual :unique constraint
+  # error the TUI's add_error/2 maps to a friendly message (rather than a
+  # hand-built changeset that might not match what Ecto really produces).
+  defp duplicate_bookmark_changeset do
+    url = "https://youtu.be/dup"
+    Repo.insert!(%Bookmark{url: url, title: "First", channel: "C"})
+
+    {:error, changeset} =
+      %Bookmark{}
+      |> Bookmark.changeset(%{url: url, title: "Second", channel: "C"})
+      |> Repo.insert()
+
+    changeset
+  end
+
+  defp duplicate_subscription_changeset do
+    url = "https://youtube.com/@dup"
+    Repo.insert!(%Playmark.Subscription{url: url, name: "Chan"})
+
+    {:error, changeset} =
+      %Playmark.Subscription{}
+      |> Playmark.Subscription.changeset(%{url: url, name: "Chan"})
+      |> Repo.insert()
+
+    changeset
+  end
+
+  defp duplicate_playlist_changeset do
+    path = "/tmp/playmark-dup-dir"
+    Repo.insert!(%Playmark.Playlist{path: path, name: "dir"})
+
+    {:error, changeset} =
+      %Playmark.Playlist{}
+      |> Playmark.Playlist.changeset(%{path: path, name: "dir"})
+      |> Repo.insert()
+
+    changeset
   end
 end

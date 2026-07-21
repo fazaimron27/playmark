@@ -46,6 +46,7 @@ search_limit = 20         # results per YouTube search
 channel_limit = 30        # videos fetched when opening a channel
 oembed_timeout_ms = 4000  # per-title metadata lookup timeout
 oembed_concurrency = 10   # parallel metadata lookups
+socket_timeout = 30       # yt-dlp per-socket timeout, seconds
 ```
 
 Settings are read at startup, so restart playmark after editing the file. An
@@ -74,7 +75,7 @@ Bookmarks view:
 - `j` / `k` (or arrow keys) — move the selection
 - `a` — add a bookmark: type/paste a YouTube URL, `Enter` fetches its title and
   channel and saves it, `Esc` cancels
-- `d` — delete the selected bookmark
+- `d` — delete the selected bookmark (`y` confirms, any other key cancels)
 - `Enter` — play the selected video in the configured player
 - `Tab` — cycle to subscriptions
 - `q` — quit
@@ -86,7 +87,7 @@ never stored, so it's always current.
 - `a` — add a subscription: paste a channel URL (e.g.
   `https://www.youtube.com/@handle`), `Enter` resolves the channel name
   and saves it
-- `d` — unsubscribe from the selected channel
+- `d` — unsubscribe from the selected channel (`y` confirms, any other key cancels)
 - `Enter` — open the channel and list its latest videos
 - `Tab` — cycle to search
 
@@ -100,11 +101,12 @@ Results follow YouTube's relevance ranking (not strictly date-sorted).
 
 Local view: register a directory and play the media files inside it — the file
 list is read fresh each time (top level only) and never stored, mirroring
-subscriptions.
+subscriptions. Files are listed in natural order, so `ep2` sorts before `ep10`
+(not after, as a plain alphabetical sort would put it).
 
 - `a` — register a directory: type a path (e.g. `~/Videos`), `Enter` verifies
   it and saves it under the directory's name
-- `d` — remove the selected directory
+- `d` — remove the selected directory (`y` confirms, any other key cancels)
 - `Enter` — open the directory and list its media files
 - `Tab` — cycle back to bookmarks
 
@@ -139,7 +141,7 @@ running player (`Q` is the only key playback accepts). In the queue manager:
 - `j` / `k` — move the selection
 - `[` / `]` — move the selected item up / down in play order
 - `d` — remove the selected item
-- `c` — clear the whole queue
+- `c` — clear the whole queue (`y` confirms, any other key cancels)
 - `Enter` — start playing from the top
 - `Esc` — close the manager, back to where you opened it from
 

@@ -9,7 +9,7 @@ defmodule Playmark.Subscriptions do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{Channel, Repo, Subscription}
+  alias Playmark.{Channel, Repo, Subscription, YouTube}
 
   @doc """
   Lists all subscriptions, newest first.
@@ -26,7 +26,8 @@ defmodule Playmark.Subscriptions do
   def add_subscription(url) when is_binary(url) do
     url = String.trim(url)
 
-    with {:ok, name} <- Channel.name(url) do
+    with {:ok, _} <- YouTube.validate(url),
+         {:ok, name} <- Channel.name(url) do
       %Subscription{}
       |> Subscription.changeset(%{url: url, name: name})
       |> Repo.insert()

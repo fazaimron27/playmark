@@ -23,6 +23,11 @@ defmodule Playmark.QueueTest do
       assert item.local == true
     end
 
+    test "stores the author (channel), so it survives a reload for the player" do
+      {:ok, item} = Queue.enqueue(attrs(%{author: "Some Channel"}))
+      assert item.author == "Some Channel"
+    end
+
     test "rejects an item missing a required field" do
       assert {:error, changeset} = Queue.enqueue(%{title: "no url"})
       refute changeset.valid?

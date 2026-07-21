@@ -400,7 +400,9 @@ defmodule Mix.Tasks.Playmark.Debug do
       subtitle_default: Playback.subtitle_default(),
       subtitle_fallback: Playback.subtitle_fallback(),
       player_client: @player_client,
-      subtitle_client: @subtitle_client
+      subtitle_client: @subtitle_client,
+      title: "<video-title>",
+      author: "<channel-name>"
     }
 
     sub = "<downloaded-sub>.vtt"
@@ -412,7 +414,7 @@ defmodule Mix.Tasks.Playmark.Debug do
 
     shell.info("\n  vlc:")
     urls = ["<resolved-stream-url>"]
-    shell.info(indent(Enum.join(Playmark.Player.Vlc.launch_args(urls, sub), " \\\n    ")))
+    shell.info(indent(Enum.join(Playmark.Player.Vlc.launch_args(urls, sub, opts), " \\\n    ")))
 
     shell.info(
       "\n  → Both attach the downloaded track with --sub-file and force-select it\n" <>

@@ -8,6 +8,8 @@ defmodule Playmark.SearchTest do
       args = Search.build_args("today's news", 20)
 
       assert args == [
+               "--socket-timeout",
+               "30",
                "--flat-playlist",
                "--print",
                "%(id)s\x1F%(title)s",
@@ -16,11 +18,12 @@ defmodule Playmark.SearchTest do
 
       # The id/title separator must be the same ASCII Unit Separator (0x1F)
       # Playmark.Channel.parse_videos/1 splits on, or search output won't parse.
-      assert String.contains?(Enum.at(args, 2), "\x1F")
+      assert Enum.any?(args, &String.contains?(&1, "\x1F"))
     end
 
     test "encodes the limit into the search count" do
-      assert ["--flat-playlist", "--print", _, "ytsearch5:cats"] = Search.build_args("cats", 5)
+      assert ["--socket-timeout", "30", "--flat-playlist", "--print", _, "ytsearch5:cats"] =
+               Search.build_args("cats", 5)
     end
 
     test "passes the query verbatim as a single arg (no shell, no injection)" do

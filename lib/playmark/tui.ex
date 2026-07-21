@@ -7,10 +7,11 @@ defmodule Playmark.TUI do
   on top:
 
     * `:list`     — browse the current view's list. `j`/`k` move, `a` adds
-                    (`/` in Search, which opens a query prompt), `d` deletes,
-                    `Tab` cycles view, `q` quits. `Enter` plays a bookmark or
-                    opens a subscription's latest videos (the Search view holds
-                    no list here — results arrive in `:videos`).
+                    (`/` in Search, which opens a query prompt), `d` deletes
+                    (via a `:confirm` prompt), `Tab` cycles view, `q` quits.
+                    `Enter` plays a bookmark or opens a subscription's latest
+                    videos (the Search view holds no list here — results arrive
+                    in `:videos`).
     * `:input`    — type into a `TextInput`. `Enter` submits, `Esc` cancels.
                     Adds a bookmark, adds a subscription, or runs a YouTube
                     search depending on the active view.
@@ -22,6 +23,10 @@ defmodule Playmark.TUI do
                     back to the view it was opened from.
     * `:playing`  — an external player owns the screen; keys are ignored until
                     it closes.
+    * `:confirm`  — a destructive action (list `d` delete, or queue `c` clear)
+                    is staged behind a `y`/`n` prompt; `y` performs it, any
+                    other key cancels. The underlying list/queue stays on screen
+                    with the prompt shown in the footer.
 
   Subscriptions store only the channel URL and name; the video list is fetched
   live (via `Playmark.Channel`) each time a subscription is opened, so it is
@@ -71,6 +76,10 @@ defmodule Playmark.TUI do
        # The mode to restore when the queue-manage modal closes (the modal can be
        # opened from :list, :videos, or :playing).
        queue_return: :list,
+       # A pending destructive action awaiting y/n confirmation (%{action, prompt}),
+       # nil outside :confirm mode; confirm_return is the mode to restore after.
+       confirm: nil,
+       confirm_return: :list,
        input: input,
        status: nil,
        playing: nil
@@ -96,6 +105,12 @@ defmodule Playmark.TUI do
 
   def handle_event(%Event.Key{} = key, %{mode: :queue_manage} = state) do
     Actions.handle_queue_key(key.code, state)
+  end
+
+  # A destructive action (list delete, queue clear) staged behind a yes/no
+  # prompt. "y" performs it; any other key cancels (see Actions.handle_confirm_key/2).
+  def handle_event(%Event.Key{} = key, %{mode: :confirm} = state) do
+    Actions.handle_confirm_key(key.code, state)
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :list} = state) do
@@ -175,12 +190,12 @@ defmodule Playmark.TUI do
      }}
   end
 
-  def handle_info({:add_result, {:error, reason}, _target}, %{mode: :fetching} = state) do
-    {:noreply, %{state | mode: :input, status: {:error, add_error(reason)}}}
+  def handle_info({:add_result, {:error, reason}, target}, %{mode: :fetching} = state) do
+    {:noreply, %{state | mode: :input, status: {:error, add_error(reason, target)}}}
   end
 
   def handle_info({:add_result, {:error, reason}}, %{mode: :fetching} = state) do
-    {:noreply, %{state | mode: :input, status: {:error, add_error(reason)}}}
+    {:noreply, %{state | mode: :input, status: {:error, add_error(reason, :bookmark)}}}
   end
 
   # Results that arrive after the add was canceled (mode no longer :fetching).
@@ -261,7 +276,7 @@ defmodule Playmark.TUI do
   end
 
   def handle_info({:bookmark_video_result, {:error, reason}}, state) do
-    {:noreply, %{state | status: {:error, "Bookmark failed: #{add_error(reason)}"}}}
+    {:noreply, %{state | status: {:error, "Bookmark failed: #{add_error(reason, :bookmark)}"}}}
   end
 
   # --- playback ------------------------------------------------------------
@@ -352,7 +367,37 @@ defmodule Playmark.TUI do
      }}
   end
 
+  # The status-clear timer fired (see subscriptions/1). Clear the footer status,
+  # but only if it still matches the status the timer was armed for — a newer
+  # status set in the meantime must not be wiped. (The runtime also drops a stale
+  # tick by token when the status changed, so this is belt-and-suspenders.)
+  def handle_info({:clear_status, status}, %{status: status} = state) do
+    {:noreply, %{state | status: nil}}
+  end
+
+  def handle_info({:clear_status, _status}, state), do: {:noreply, state}
+
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # --- subscriptions -------------------------------------------------------
+
+  # A one-shot timer to clear a transient footer status after a few seconds, so a
+  # stale "Added: …" / error doesn't linger indefinitely. The runtime reconciles
+  # this after every transition (see ExRatatui.App), so we declare it purely as a
+  # function of state: a set status arms the timer, a nil status returns none and
+  # disarms it. The message carries the current status, which does double duty —
+  # it lets handle_info avoid clobbering a newer status, and (because the runtime
+  # diffs subscriptions by their fields) it forces a fresh timer whenever the
+  # status changes, so each new message gets its own full window rather than
+  # inheriting the previous one's already-fired timer.
+  @status_clear_ms 5_000
+
+  @impl true
+  def subscriptions(%{status: nil}), do: []
+
+  def subscriptions(%{status: status}) do
+    [ExRatatui.Subscription.once(:status_clear, @status_clear_ms, {:clear_status, status})]
+  end
 
   # --- rendering -----------------------------------------------------------
 
@@ -366,11 +411,29 @@ defmodule Playmark.TUI do
   defp play_return_mode(%{videos: videos}) when videos != [], do: :videos
   defp play_return_mode(_state), do: :list
 
-  defp add_error(%Ecto.Changeset{} = changeset) do
+  # A duplicate (the unique index on :url / :path) is the common, expected add
+  # failure — the raw "url has already been taken" reads poorly, so we map it to a
+  # per-target message. `target` is :bookmark / :subscription / :playlist. Any
+  # other changeset error keeps the generic field-by-field text; a plain reason
+  # (e.g. a yt-dlp/oEmbed string) passes through unchanged.
+  defp add_error(%Ecto.Changeset{} = changeset, target) do
+    if duplicate?(changeset), do: duplicate_message(target), else: changeset_errors(changeset)
+  end
+
+  defp add_error(reason, _target), do: to_string(reason)
+
+  # True when the changeset failed only because the URL/path is already taken.
+  defp duplicate?(%Ecto.Changeset{errors: errors}) do
+    Enum.any?(errors, fn {_field, {_msg, opts}} -> opts[:constraint] == :unique end)
+  end
+
+  defp duplicate_message(:subscription), do: "Already subscribed to this channel"
+  defp duplicate_message(:playlist), do: "Directory already registered"
+  defp duplicate_message(_bookmark), do: "Already bookmarked"
+
+  defp changeset_errors(changeset) do
     changeset
     |> Ecto.Changeset.traverse_errors(fn {msg, _opts} -> msg end)
     |> Enum.map_join("; ", fn {field, msgs} -> "#{field} #{Enum.join(msgs, ", ")}" end)
   end
-
-  defp add_error(reason), do: to_string(reason)
 end

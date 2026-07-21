@@ -29,6 +29,7 @@ defmodule Playmark.Config do
       channel_limit = 30        # videos fetched per channel open
       oembed_timeout_ms = 4000  # per-title oEmbed lookup timeout
       oembed_concurrency = 10   # parallel oEmbed lookups
+      socket_timeout = 30       # yt-dlp per-socket timeout, seconds
 
   Whitespace around keys and values is trimmed. Unknown keys are ignored (with a
   warning) so a typo can't crash boot. An unparseable value for a known key is
@@ -52,7 +53,8 @@ defmodule Playmark.Config do
     "search_limit" => {:search_limit, :pos_integer},
     "channel_limit" => {:channel_limit, :pos_integer},
     "oembed_timeout_ms" => {:oembed_timeout_ms, :pos_integer},
-    "oembed_concurrency" => {:oembed_concurrency, :pos_integer}
+    "oembed_concurrency" => {:oembed_concurrency, :pos_integer},
+    "socket_timeout" => {:socket_timeout, :pos_integer}
   }
 
   @doc """

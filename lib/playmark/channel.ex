@@ -35,6 +35,12 @@ defmodule Playmark.Channel do
   @default_oembed_timeout_ms 4_000
   @default_oembed_concurrency 10
 
+  # Bounds each yt-dlp socket read/connect so a black-holed network can't hang a
+  # listing forever. The TUI's Esc only drops the *result* (a mode guard) — the
+  # underlying process keeps running — so the timeout is what actually frees it.
+  # User-overridable via the :socket_timeout config key (see Playmark.Config).
+  @default_socket_timeout 30
+
   @doc """
   Fetches a channel's display name, for storing alongside the subscription.
 
@@ -46,6 +52,8 @@ defmodule Playmark.Channel do
     # "NA" under --flat-playlist. --playlist-items 1 reads just one entry so this
     # stays fast.
     args = [
+      "--socket-timeout",
+      socket_timeout(),
       "--playlist-items",
       "1",
       "--flat-playlist",
@@ -76,6 +84,8 @@ defmodule Playmark.Channel do
   """
   def list_videos(url, limit \\ limit()) when is_binary(url) and is_integer(limit) do
     args = [
+      "--socket-timeout",
+      socket_timeout(),
       "--playlist-end",
       Integer.to_string(limit),
       "--flat-playlist",
@@ -92,43 +102,63 @@ defmodule Playmark.Channel do
 
   @doc """
   Replaces each flat-playlist title with its oEmbed title (the original-language
-  one, matching what bookmarking stores).
+  one, matching what bookmarking stores) and attaches the channel name as
+  `:author`.
 
-  Titles seen before are served from `Playmark.Cache` (a video's title is
-  effectively immutable), so only videos missing from the cache trigger an oEmbed
-  request. Those requests run in parallel; any video whose lookup fails or times
-  out keeps its flat title, so a flaky request never drops a video from the list.
-  A failed lookup is not cached. Order is preserved.
+  Both fields come from the same oEmbed lookup. Values seen before are served
+  from `Playmark.Cache` (a video's title/author are effectively immutable), so
+  only videos missing from the cache trigger an oEmbed request. Those requests
+  run in parallel; any video whose lookup fails or times out keeps its flat title
+  (and a `nil` author), so a flaky request never drops a video from the list. A
+  failed lookup is not cached. Order is preserved.
+
+  The `:author` feeds the player's artist metadata (see `Playmark.Player.Vlc`);
+  a `nil` author simply means no artist flag is set.
   """
   def enrich_titles([]), do: []
 
   def enrich_titles(videos) do
-    # Read each id's cached title once, splitting hits (a resolved title) from
-    # misses (still need an oEmbed request).
+    # Classify each video with a single title lookup, keeping the looked-up value
+    # so a hit needs no second read. A hit carries its cached title; a miss still
+    # needs an oEmbed request. (The author lives under its own key, read only for
+    # the hits that reached this list — a miss's author comes from oEmbed.)
     {hits, misses} =
-      Enum.split_with(videos, fn video -> match?({:ok, _}, Cache.get({:title, video.id})) end)
+      videos
+      |> Enum.map(fn video -> {video, Cache.get({:title, video.id})} end)
+      |> Enum.split_with(fn {_video, title} -> match?({:ok, _}, title) end)
 
-    resolved = Map.new(hits, fn video -> {video.id, cached_title(video.id, video.title)} end)
+    resolved =
+      Map.new(hits, fn {video, {:ok, title}} ->
+        {video.id, {title, cached(:author, video.id, nil)}}
+      end)
 
     resolved =
       misses
+      |> Enum.map(fn {video, _miss} -> video end)
       |> fetch_titles()
-      |> Enum.reduce(resolved, fn video, acc -> Map.put(acc, video.id, video.title) end)
+      |> Enum.reduce(resolved, fn video, acc ->
+        Map.put(acc, video.id, {video.title, video.author})
+      end)
 
-    # Reassemble in the original order, swapping in each resolved title.
-    Enum.map(videos, fn video -> %{video | title: Map.fetch!(resolved, video.id)} end)
+    # Reassemble in the original order, swapping in each resolved title/author.
+    Enum.map(videos, fn video ->
+      {title, author} = Map.fetch!(resolved, video.id)
+      video |> Map.put(:title, title) |> Map.put(:author, author)
+    end)
   end
 
-  # The cached title, or the flat fallback if the entry vanished since the split.
-  defp cached_title(id, fallback) do
-    case Cache.get({:title, id}) do
-      {:ok, title} -> title
+  # The cached value for a namespaced key, or the fallback if the entry vanished
+  # since the hit/miss split.
+  defp cached(namespace, id, fallback) do
+    case Cache.get({namespace, id}) do
+      {:ok, value} -> value
       :miss -> fallback
     end
   end
 
-  # Fetches oEmbed titles for the given videos in parallel, caching each success.
-  # Returns the videos with their titles replaced (flat title kept on failure).
+  # Fetches oEmbed titles + authors for the given videos in parallel, caching each
+  # success. Returns the videos with `:title` replaced and `:author` set (flat
+  # title kept and `:author` nil on failure).
   defp fetch_titles([]), do: []
 
   defp fetch_titles(videos) do
@@ -138,12 +168,13 @@ defmodule Playmark.Channel do
     |> Task.async_stream(
       fn video ->
         case metadata.fetch(video.url) do
-          {:ok, %{title: title}} ->
+          {:ok, %{title: title, channel: channel}} ->
             Cache.put({:title, video.id}, title)
-            %{video | title: title}
+            Cache.put({:author, video.id}, channel)
+            video |> Map.put(:title, title) |> Map.put(:author, channel)
 
           {:error, _reason} ->
-            video
+            Map.put(video, :author, nil)
         end
       end,
       max_concurrency: oembed_concurrency(),
@@ -154,7 +185,7 @@ defmodule Playmark.Channel do
     |> Enum.zip(videos)
     |> Enum.map(fn
       {{:ok, enriched}, _original} -> enriched
-      {{:exit, _reason}, original} -> original
+      {{:exit, _reason}, original} -> Map.put(original, :author, nil)
     end)
   end
 
@@ -195,4 +226,10 @@ defmodule Playmark.Channel do
 
   defp oembed_concurrency,
     do: Application.get_env(:playmark, :oembed_concurrency, @default_oembed_concurrency)
+
+  # yt-dlp wants the socket timeout as a string arg; the config value is an
+  # integer (seconds), so render it here.
+  defp socket_timeout,
+    do:
+      Integer.to_string(Application.get_env(:playmark, :socket_timeout, @default_socket_timeout))
 end

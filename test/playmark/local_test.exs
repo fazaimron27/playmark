@@ -24,6 +24,15 @@ defmodule Playmark.LocalTest do
       assert second.title == "b.mp4"
     end
 
+    test "sorts numbered files naturally, not lexically", %{dir: dir} do
+      # Lexical order would put "ep10" before "ep2"; natural order compares the
+      # embedded digit runs as numbers, so episodes list in playback order.
+      for name <- ["ep1.mp4", "ep2.mp4", "ep10.mp4", "ep20.mp4"], do: touch(dir, name)
+
+      assert {:ok, files} = Local.list_files(dir)
+      assert Enum.map(files, & &1.title) == ["ep1.mp4", "ep2.mp4", "ep10.mp4", "ep20.mp4"]
+    end
+
     test "keeps audio and video extensions, case-insensitively", %{dir: dir} do
       touch(dir, "song.MP3")
       touch(dir, "clip.WebM")

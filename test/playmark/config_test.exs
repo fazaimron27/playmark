@@ -50,7 +50,8 @@ defmodule Playmark.ConfigTest do
         :search_limit,
         :channel_limit,
         :oembed_timeout_ms,
-        :oembed_concurrency
+        :oembed_concurrency,
+        :socket_timeout
       ]
 
       original = Enum.map(keys, fn key -> {key, Application.fetch_env(:playmark, key)} end)
@@ -96,6 +97,7 @@ defmodule Playmark.ConfigTest do
       channel_limit = 12
       oembed_timeout_ms = 2000
       oembed_concurrency = 4
+      socket_timeout = 45
       """
 
       in_tmp_config(contents, fn ->
@@ -110,6 +112,7 @@ defmodule Playmark.ConfigTest do
         assert Application.get_env(:playmark, :channel_limit) == 12
         assert Application.get_env(:playmark, :oembed_timeout_ms) == 2000
         assert Application.get_env(:playmark, :oembed_concurrency) == 4
+        assert Application.get_env(:playmark, :socket_timeout) == 45
       end)
     end
 

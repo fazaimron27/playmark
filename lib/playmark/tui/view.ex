@@ -70,6 +70,13 @@ defmodule Playmark.TUI.View do
   # showing_videos?/1). Otherwise the active view decides.
   defp body(state) do
     cond do
+      # A queue-clear confirmation keeps the queue on screen (the prompt shows in
+      # the footer) so the user sees what they're about to wipe. A list-delete
+      # confirmation needs no special branch — it falls through to the view-based
+      # clauses below, which don't gate on mode, so the list stays visible.
+      state.mode == :confirm and confirm_over_queue?(state) ->
+        queue_body(state)
+
       state.mode == :queue_manage ->
         queue_body(state)
 
@@ -147,6 +154,13 @@ defmodule Playmark.TUI.View do
 
   defp queue_source(%{local: true}), do: "local"
   defp queue_source(_item), do: "YouTube"
+
+  # True when a confirmation is staged over the queue modal (clearing the queue),
+  # so the body keeps showing the queue behind the prompt rather than the base
+  # view. A list-delete confirmation (confirm_return: :list) falls through to the
+  # normal view branches instead.
+  defp confirm_over_queue?(%{mode: :confirm, confirm_return: :queue_manage}), do: true
+  defp confirm_over_queue?(_state), do: false
 
   # True while browsing a channel's video list, and while a video launched from
   # that list is playing — so both the body and header keep showing the video
@@ -353,9 +367,19 @@ defmodule Playmark.TUI.View do
     }
   end
 
-  # A status message (success or error) always wins over the mode hints.
-  defp footer_content(%{status: {:error, msg}}), do: {msg, :red}
+  # A status message (success or error) always wins over the mode hints. An error
+  # can carry raw multi-line yt-dlp/player stderr, which would wrap and overflow
+  # the 3-row footer — so it's collapsed to a single readable line (the full text
+  # is still logged). Info messages are app-authored and short, so left as-is.
+  defp footer_content(%{status: {:error, msg}}), do: {short_error(msg), :red}
   defp footer_content(%{status: {:info, msg}}), do: {msg, :green}
+
+  # A staged confirmation shows its prompt and the y/n choice, in a warning color
+  # so a destructive action reads as one. Placed above the mode hints; the
+  # confirm state clears `status` on entry so nothing masks it.
+  defp footer_content(%{mode: :confirm, confirm: %{prompt: prompt}}),
+    do: {"#{prompt}  (y: yes | any other key: cancel)", :yellow}
+
   defp footer_content(%{mode: :input}), do: {"Enter: add | Esc: cancel", :white}
   defp footer_content(%{mode: :fetching}), do: {"Working… (Esc to cancel)", :cyan}
   defp footer_content(%{mode: :loading}), do: {"Loading… (Esc to cancel)", :cyan}
@@ -394,4 +418,25 @@ defmodule Playmark.TUI.View do
   defp clamp(n, lo, _hi) when n < lo, do: lo
   defp clamp(n, _lo, hi) when n > hi, do: hi
   defp clamp(n, _lo, _hi), do: n
+
+  # Error reasons often carry multi-line yt-dlp/player stderr, which wraps
+  # unreadably in the single-line footer. Collapse to the first non-blank line
+  # and cap its length so the footer stays legible; the full reason is still
+  # logged (see Playmark.TUI's :play_result handler).
+  @error_max_len 120
+  defp short_error(msg) when is_binary(msg) do
+    first =
+      msg
+      |> String.split("\n", trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.find("", &(&1 != ""))
+
+    if String.length(first) > @error_max_len do
+      String.slice(first, 0, @error_max_len - 1) <> "…"
+    else
+      first
+    end
+  end
+
+  defp short_error(msg), do: to_string(msg)
 end

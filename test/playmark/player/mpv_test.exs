@@ -9,7 +9,8 @@ defmodule Playmark.Player.MpvTest do
     subtitle_default: "en",
     subtitle_fallback: nil,
     player_client: "web_safari",
-    subtitle_client: "default"
+    subtitle_client: "default",
+    title: "Some Video Title"
   }
 
   describe "play_args/3" do
@@ -51,6 +52,24 @@ defmodule Playmark.Player.MpvTest do
       refute "--sid=1" in args
       # The stream client is always forced, captions or not.
       assert raw_options(args) =~ "player_client=web_safari"
+    end
+
+    test "forces the media title so the player shows it, not \"unknown title\"" do
+      args = Mpv.play_args("https://youtu.be/x", nil, @opts)
+
+      assert "--force-media-title=Some Video Title" in args
+    end
+
+    test "omits the title flag when no title is known" do
+      args = Mpv.play_args("https://youtu.be/x", nil, %{@opts | title: nil})
+
+      refute Enum.any?(args, &String.starts_with?(&1, "--force-media-title"))
+    end
+
+    test "omits the title flag when the title is blank" do
+      args = Mpv.play_args("https://youtu.be/x", nil, %{@opts | title: "   "})
+
+      refute Enum.any?(args, &String.starts_with?(&1, "--force-media-title"))
     end
   end
 

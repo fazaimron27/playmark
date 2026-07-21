@@ -45,7 +45,7 @@ defmodule Playmark.Player.Mpv do
   @impl true
   def play_local(path, opts) when is_binary(path) do
     Playback.report(opts, :playing)
-    Playback.run(executable(), ["--fs", path])
+    Playback.run(executable(), ["--fs"] ++ title_args(opts) ++ [path])
   end
 
   @doc """
@@ -55,9 +55,22 @@ defmodule Playmark.Player.Mpv do
   """
   def play_args(url, sub_file, opts) do
     ["--fs", "--ytdl-format=#{opts.format}", "--ytdl-raw-options=#{ytdl_raw_options(opts)}"] ++
+      title_args(opts) ++
       subtitle_args(sub_file) ++
       [url]
   end
+
+  # A pre-resolved stream carries no title metadata, so mpv shows "unknown title"
+  # unless we force one. Omitted when no title is known (nil/blank) so mpv keeps
+  # whatever it can infer.
+  defp title_args(%{title: title}) when is_binary(title) do
+    case String.trim(title) do
+      "" -> []
+      trimmed -> ["--force-media-title=#{trimmed}"]
+    end
+  end
+
+  defp title_args(_opts), do: []
 
   # A downloaded sidecar is loaded with --sub-file and force-selected with --sid=1
   # so it displays immediately (mpv won't auto-select an external sub otherwise).

@@ -36,6 +36,13 @@ defmodule Playmark.Player do
       (`:resolving`, `:captions`, `:playing`) as playback advances, so the UI can
       show step-by-step feedback. Defaults to a no-op, so backends may call it
       unconditionally.
+    * `:title` — the display title to hand the player (via `--force-media-title`
+      for mpv, `--meta-title` for VLC). Without it the player falls back to its
+      own placeholder ("unknown title"), since a pre-resolved stream URL carries
+      no metadata. `nil` or blank means no title flag is added.
+    * `:author` — the display artist/author (the YouTube channel) to hand the
+      player. Only VLC consumes it (`--meta-artist`); mpv has no artist-override
+      flag, so mpv ignores it. `nil` or blank means no artist flag is added.
   """
   @type opts :: %{
           format: String.t(),
@@ -44,7 +51,9 @@ defmodule Playmark.Player do
           subtitle_fallback: String.t() | nil,
           player_client: String.t(),
           subtitle_client: String.t(),
-          progress: (atom() -> any())
+          progress: (atom() -> any()),
+          title: String.t() | nil,
+          author: String.t() | nil
         }
 
   @typedoc "`:ok` on clean playback, or a reason string on failure."
