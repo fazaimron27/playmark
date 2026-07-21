@@ -35,6 +35,12 @@ defmodule Playmark.Player.Captions do
 
   require Logger
 
+  # Bounds each yt-dlp socket read/connect so a black-holed network can't hang
+  # caption probe/download forever (matching Playmark.Channel). Captions are
+  # best-effort, so on timeout yt-dlp errors and the video just plays without one.
+  # User-overridable via the :socket_timeout config key (see Playmark.Config).
+  @default_socket_timeout 30
+
   @doc """
   Downloads the best caption track for `url` and returns the path to a temp
   `.vtt`, or `nil` if none is available.
@@ -117,6 +123,8 @@ defmodule Playmark.Player.Captions do
   # used so caption tracks are actually listed (see moduledoc).
   defp probe(url, opts) do
     args = [
+      "--socket-timeout",
+      socket_timeout(),
       "--extractor-args",
       "youtube:player_client=#{opts.subtitle_client}",
       "--skip-download",
@@ -158,6 +166,8 @@ defmodule Playmark.Player.Captions do
     write_flag = if kind == :manual, do: "--write-subs", else: "--write-auto-subs"
 
     args = [
+      "--socket-timeout",
+      socket_timeout(),
       "--extractor-args",
       "youtube:player_client=#{opts.subtitle_client}",
       write_flag,
@@ -198,4 +208,9 @@ defmodule Playmark.Player.Captions do
       _ -> nil
     end
   end
+
+  # yt-dlp socket timeout as a string arg (shared :socket_timeout key, default
+  # @default_socket_timeout — see Playmark.Config and Playmark.Channel).
+  defp socket_timeout,
+    do: to_string(Application.get_env(:playmark, :socket_timeout, @default_socket_timeout))
 end
