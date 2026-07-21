@@ -27,6 +27,12 @@ defmodule Playmark.Search do
   # Default result count when the user hasn't set :search_limit (Playmark.Config).
   @default_limit 20
 
+  # Bounds each yt-dlp socket read/connect so a black-holed network can't hang a
+  # search forever (matching Playmark.Channel). Esc in the TUI only drops the
+  # result; the timeout is what frees the underlying process. User-overridable via
+  # the :socket_timeout config key (see Playmark.Config).
+  @default_socket_timeout 30
+
   @doc """
   Searches YouTube for `query`, returning up to `limit` results by relevance.
 
@@ -57,6 +63,8 @@ defmodule Playmark.Search do
   """
   def build_args(query, limit) when is_binary(query) and is_integer(limit) do
     [
+      "--socket-timeout",
+      socket_timeout(),
       "--flat-playlist",
       "--print",
       "%(id)s#{@sep}%(title)s",
@@ -66,4 +74,9 @@ defmodule Playmark.Search do
 
   # User-overridable result count (see Playmark.Config), default @default_limit.
   defp limit, do: Application.get_env(:playmark, :search_limit, @default_limit)
+
+  # yt-dlp socket timeout as a string arg (shared :socket_timeout key, default
+  # @default_socket_timeout — see Playmark.Config and Playmark.Channel).
+  defp socket_timeout,
+    do: to_string(Application.get_env(:playmark, :socket_timeout, @default_socket_timeout))
 end
