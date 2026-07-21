@@ -117,12 +117,17 @@ defmodule Playmark.Queue do
   end
 
   # Swap two items' positions. SQLite has a single writer and this app a single
-  # connection, so there's no concurrent-writer race to guard against; a plain
-  # two-step update is enough. Positions carry a NOT NULL but no unique
-  # constraint, so a transient duplicate mid-swap is harmless.
+  # connection, so there's no concurrent-writer race to guard against. Positions
+  # carry a NOT NULL but no unique constraint, so a transient duplicate mid-swap
+  # is harmless. The two updates run in a transaction so a crash between them
+  # can't leave the swap half-applied (two items sharing a position, i.e. a
+  # non-deterministic order) — either both land or neither does.
   defp swap(a, b) do
-    Repo.update!(QueueItem.changeset(a, %{"position" => b.position}))
-    Repo.update!(QueueItem.changeset(b, %{"position" => a.position}))
+    Repo.transaction(fn ->
+      Repo.update!(QueueItem.changeset(a, %{"position" => b.position}))
+      Repo.update!(QueueItem.changeset(b, %{"position" => a.position}))
+    end)
+
     :ok
   end
 
