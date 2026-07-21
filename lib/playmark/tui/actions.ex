@@ -29,7 +29,7 @@ defmodule Playmark.TUI.Actions do
   def handle_list_key("/", state), do: {:noreply, state}
   def handle_list_key("a", %{view: :search} = state), do: {:noreply, state}
   def handle_list_key("a", state), do: {:noreply, start_input(state)}
-  def handle_list_key("d", state), do: {:noreply, delete_selected(state)}
+  def handle_list_key("d", state), do: {:noreply, confirm_delete_selected(state)}
   def handle_list_key("enter", state), do: {:noreply, activate_selected(state)}
   # "e" appends the selected item to the playback queue. A no-op in views with no
   # selectable list here (search has none in :list mode) via enqueue_selected/1.
@@ -64,6 +64,56 @@ defmodule Playmark.TUI.Actions do
   defp activate_selected(%{view: :subscriptions} = state), do: load_videos(state)
   defp activate_selected(%{view: :local} = state), do: load_files(state)
   defp activate_selected(%{view: :search} = state), do: state
+
+  # A delete is destructive and a single keystroke, so it's staged behind a
+  # confirmation rather than done immediately. We snapshot the item and a prompt
+  # into `confirm`, flip to :confirm mode, and remember the mode to return to on
+  # cancel. The actual delete runs from handle_confirm_key/2 on "y". A no-op when
+  # nothing is selected (e.g. an empty list).
+  defp confirm_delete_selected(state) do
+    case selected_item(state) do
+      nil ->
+        state
+
+      item ->
+        %{
+          state
+          | mode: :confirm,
+            confirm_return: :list,
+            confirm: %{action: :delete_selected, prompt: delete_prompt(state, item)},
+            status: nil
+        }
+    end
+  end
+
+  # The confirmation prompt for deleting the selected item, worded per view.
+  defp delete_prompt(%{view: :bookmarks}, item), do: "Delete bookmark \"#{item.title}\"?"
+  defp delete_prompt(%{view: :subscriptions}, item), do: "Unsubscribe from \"#{item.name}\"?"
+  defp delete_prompt(%{view: :local}, item), do: "Remove local playlist \"#{item.name}\"?"
+
+  # --- confirmation mode ---------------------------------------------------
+
+  # "y" performs the staged action; any other key (including "n"/Esc) cancels.
+  # The action name in `confirm` decides what runs, then we drop back to the mode
+  # it was invoked from. Kept as a small dispatch so new confirmable actions only
+  # add a perform clause plus their confirm_* entry point.
+  def handle_confirm_key("y", %{confirm: %{action: action}} = state) do
+    {:noreply, perform_confirmed(action, state)}
+  end
+
+  def handle_confirm_key(_code, state), do: {:noreply, cancel_confirm(state)}
+
+  defp cancel_confirm(state) do
+    %{state | mode: state.confirm_return, confirm: nil, status: {:info, "Canceled"}}
+  end
+
+  defp perform_confirmed(:delete_selected, state) do
+    %{delete_selected(state) | mode: :list, confirm: nil}
+  end
+
+  defp perform_confirmed(:clear_queue, state) do
+    %{clear_queue(state) | mode: :queue_manage, confirm: nil}
+  end
 
   defp delete_selected(state) do
     case selected_item(state) do
@@ -251,7 +301,7 @@ defmodule Playmark.TUI.Actions do
   def handle_queue_key("d", state), do: {:noreply, remove_queued(state)}
   def handle_queue_key("[", state), do: {:noreply, reorder_queued(state, :up)}
   def handle_queue_key("]", state), do: {:noreply, reorder_queued(state, :down)}
-  def handle_queue_key("c", state), do: {:noreply, clear_queue(state)}
+  def handle_queue_key("c", state), do: {:noreply, confirm_clear_queue(state)}
   def handle_queue_key("enter", state), do: {:noreply, start_queue(state)}
 
   # Esc closes the modal, restoring the mode it was opened from.
@@ -307,6 +357,24 @@ defmodule Playmark.TUI.Actions do
         index = Enum.find_index(queue, &(&1.id == item.id)) || state.queue_selected
         %{state | queue: queue, queue_selected: index}
     end
+  end
+
+  # Clearing wipes the whole queue in one keystroke, so it's staged behind a
+  # confirmation like a list delete. A no-op (with a hint) on an empty queue so
+  # the prompt never appears for nothing. The clear itself runs from
+  # handle_confirm_key/2 on "y"; Esc/other keys return to the modal.
+  defp confirm_clear_queue(%{queue: []} = state) do
+    %{state | status: {:info, "Queue is already empty"}}
+  end
+
+  defp confirm_clear_queue(state) do
+    %{
+      state
+      | mode: :confirm,
+        confirm_return: :queue_manage,
+        confirm: %{action: :clear_queue, prompt: "Clear all #{length(state.queue)} queued items?"},
+        status: nil
+    }
   end
 
   defp clear_queue(state) do
