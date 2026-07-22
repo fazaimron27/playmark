@@ -20,7 +20,10 @@ defmodule Playmark.TUI do
                     search.
     * `:videos`   — browse a subscription's latest videos or a search's results.
                     `Enter` plays, `b` bookmarks the selected video, `Esc` goes
-                    back to the view it was opened from.
+                    back to the view it was opened from. On a subscription
+                    listing, `s`/`v` flip between the channel's Streams and Videos
+                    tabs (re-fetching in place); the Streams tab badges each row's
+                    live status. `s`/`v` are no-ops for search/local listings.
     * `:playing`  — an external player owns the screen; keys are ignored until
                     it closes.
     * `:confirm`  — a destructive action (list `d` delete, queue/history `d`
@@ -73,6 +76,11 @@ defmodule Playmark.TUI do
        queue: Queue.list_items(),
        videos: [],
        channel_name: nil,
+       # The canonical URL of the channel whose videos are open (nil otherwise),
+       # and which of its tabs is showing (:videos | :streams). Kept so the `s`/`v`
+       # keys can re-fetch the other tab of the same channel (see Actions.switch_tab/2).
+       channel_url: nil,
+       video_tab: :videos,
        selected: 0,
        # The selection index inside the queue-manage modal, kept separate from
        # `selected` so opening/closing the modal doesn't disturb the base view's
@@ -229,22 +237,46 @@ defmodule Playmark.TUI do
 
   # --- channel video listing ----------------------------------------------
 
-  def handle_info({:videos_result, {:ok, videos}, name}, %{mode: :loading} = state) do
+  def handle_info({:videos_result, {:ok, videos}, name, url, tab}, %{mode: :loading} = state) do
+    label = if tab == :streams, do: "streams", else: "videos"
+
     status =
       if videos == [],
-        do: {:info, "No videos found for #{name}"},
-        else: {:info, "#{length(videos)} videos from #{name}"}
+        do: {:info, "No #{label} found for #{name}"},
+        else: {:info, "#{length(videos)} #{label} from #{name}"}
 
     {:noreply,
-     %{state | mode: :videos, videos: videos, channel_name: name, selected: 0, status: status}}
+     %{
+       state
+       | mode: :videos,
+         videos: videos,
+         channel_name: name,
+         channel_url: url,
+         video_tab: tab,
+         selected: 0,
+         status: status
+     }}
   end
 
-  def handle_info({:videos_result, {:error, reason}, _name}, %{mode: :loading} = state) do
-    {:noreply, %{state | mode: :list, status: {:error, "Could not load videos: #{reason}"}}}
+  # A tab fetch failed. When switching tabs on an already-open channel
+  # (channel_url set), keep the current list on screen and just surface the
+  # error, rather than dropping back to the subscription list. Otherwise (an
+  # initial open) fall back to :list as before.
+  def handle_info(
+        {:videos_result, {:error, reason}, _name, url, tab},
+        %{mode: :loading} = state
+      ) do
+    label = if tab == :streams, do: "streams", else: "videos"
+
+    if is_binary(url) and state.videos != [] do
+      {:noreply, %{state | mode: :videos, status: {:error, "Could not load #{label}: #{reason}"}}}
+    else
+      {:noreply, %{state | mode: :list, status: {:error, "Could not load #{label}: #{reason}"}}}
+    end
   end
 
   # Late video-list result after cancel.
-  def handle_info({:videos_result, _result, _name}, state), do: {:noreply, state}
+  def handle_info({:videos_result, _result, _name, _url, _tab}, state), do: {:noreply, state}
 
   # --- local file listing --------------------------------------------------
   # A local playlist's files land in the same :videos mode as a channel listing;
@@ -257,7 +289,16 @@ defmodule Playmark.TUI do
         else: {:info, "#{length(files)} files in #{name}"}
 
     {:noreply,
-     %{state | mode: :videos, videos: files, channel_name: name, selected: 0, status: status}}
+     %{
+       state
+       | mode: :videos,
+         videos: files,
+         channel_name: name,
+         channel_url: nil,
+         video_tab: :videos,
+         selected: 0,
+         status: status
+     }}
   end
 
   def handle_info({:files_result, {:error, reason}, _name}, %{mode: :loading} = state) do
@@ -278,7 +319,16 @@ defmodule Playmark.TUI do
         else: {:info, "#{length(videos)} results for #{query}"}
 
     {:noreply,
-     %{state | mode: :videos, videos: videos, channel_name: query, selected: 0, status: status}}
+     %{
+       state
+       | mode: :videos,
+         videos: videos,
+         channel_name: query,
+         channel_url: nil,
+         video_tab: :videos,
+         selected: 0,
+         status: status
+     }}
   end
 
   def handle_info({:search_result, {:error, reason}, _query}, %{mode: :loading} = state) do

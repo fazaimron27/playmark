@@ -23,7 +23,8 @@ defmodule Playmark.TUI.Actions do
     Playlists,
     Queue,
     Search,
-    Subscriptions
+    Subscriptions,
+    YouTube
   }
 
   # --- list mode -----------------------------------------------------------
@@ -201,6 +202,13 @@ defmodule Playmark.TUI.Actions do
   # playback queue, carrying its own local? flag so the play path is right later.
   def handle_videos_key("e", state), do: {:noreply, enqueue_selected(state)}
 
+  # "s"/"v" flip an open channel listing between its Streams and Videos tabs,
+  # re-fetching in place (see switch_tab/2). Only meaningful for a subscription
+  # listing (channel_url set) — a no-op for a search or local-file listing, and a
+  # no-op when already on the requested tab.
+  def handle_videos_key("s", state), do: {:noreply, switch_tab(state, :streams)}
+  def handle_videos_key("v", state), do: {:noreply, switch_tab(state, :videos)}
+
   # Back to the list we came from. The view is unchanged — a video list is only
   # ever opened from Subscriptions, Search, or Local — so keep it, clearing the
   # results.
@@ -211,6 +219,8 @@ defmodule Playmark.TUI.Actions do
        | mode: :list,
          videos: [],
          channel_name: nil,
+         channel_url: nil,
+         video_tab: :videos,
          selected: 0,
          status: nil
      }}
@@ -705,24 +715,48 @@ defmodule Playmark.TUI.Actions do
         state
 
       subscription ->
-        parent = self()
-        chan = channel()
-        name = subscription.name
-        url = subscription.url
-
-        Task.start(fn ->
-          result =
-            try do
-              chan.list_videos(url)
-            rescue
-              error -> {:error, Exception.message(error)}
-            end
-
-          send(parent, {:videos_result, result, name})
-        end)
-
-        %{state | mode: :loading, status: {:info, "Loading videos from #{name}… (Esc to cancel)"}}
+        # Opening a subscription always starts on its Videos tab; `s` later flips
+        # to Streams via switch_tab/2. We canonicalize the stored URL here so the
+        # channel_url held in state (and reused by switch_tab) is tab-free even for
+        # a legacy subscription that still carries a `/videos` segment.
+        url = YouTube.canonical_channel_url(subscription.url)
+        fetch_videos_tab(state, url, subscription.name, :videos)
     end
+  end
+
+  # Re-fetches the currently-open channel's other tab in place. Only meaningful in
+  # :videos mode with a channel_url set (a subscription listing, not a search or
+  # local-file listing, which have no channel URL); a no-op otherwise, and a no-op
+  # when already on the requested tab. Reuses the same async path as load_videos,
+  # so a late result after Esc is dropped by the mode guard in handle_info.
+  def switch_tab(%{mode: :videos, channel_url: url, video_tab: current} = state, tab)
+      when is_binary(url) and tab in [:videos, :streams] and tab != current do
+    fetch_videos_tab(state, url, state.channel_name, tab)
+  end
+
+  def switch_tab(state, _tab), do: state
+
+  # Spawns the tab fetch and drops into :loading. `url` is the canonical (tab-free)
+  # channel URL; `Channel.list_videos/3` appends the tab. The result carries url +
+  # tab back so handle_info can set channel_url/video_tab and, on error, keep the
+  # current list on screen when we were already browsing this channel.
+  defp fetch_videos_tab(state, url, name, tab) do
+    parent = self()
+    chan = channel()
+    label = if tab == :streams, do: "streams", else: "videos"
+
+    Task.start(fn ->
+      result =
+        try do
+          chan.list_videos(url, tab)
+        rescue
+          error -> {:error, Exception.message(error)}
+        end
+
+      send(parent, {:videos_result, result, name, url, tab})
+    end)
+
+    %{state | mode: :loading, status: {:info, "Loading #{label} from #{name}… (Esc to cancel)"}}
   end
 
   # --- opening a local playlist (list its files) ---------------------------

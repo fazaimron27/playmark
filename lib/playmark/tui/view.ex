@@ -95,14 +95,27 @@ defmodule Playmark.TUI.View do
       showing_videos?(state) ->
         {title, empty_text} = videos_labels(state)
 
-        table_or_empty(
-          Enum.map(state.videos, &[&1.title]),
-          ["Title"],
-          [{:percentage, 100}],
-          state.selected,
-          title,
-          empty_text
-        )
+        # The Streams tab badges each row's live status (LIVE / ENDED / SOON); the
+        # Videos tab and search/local listings are plain title lists.
+        if Map.get(state, :video_tab) == :streams do
+          table_or_empty(
+            Enum.map(state.videos, &[&1.title, live_badge(&1.live)]),
+            ["Title", "Status"],
+            [{:percentage, 85}, {:percentage, 15}],
+            state.selected,
+            title,
+            empty_text
+          )
+        else
+          table_or_empty(
+            Enum.map(state.videos, &[&1.title]),
+            ["Title"],
+            [{:percentage, 100}],
+            state.selected,
+            title,
+            empty_text
+          )
+        end
 
       state.view == :bookmarks ->
         table_or_empty(
@@ -334,7 +347,15 @@ defmodule Playmark.TUI.View do
   # results; the active view says which, so the table title matches the header.
   defp videos_labels(%{view: :search}), do: {" Search results ", "No results."}
   defp videos_labels(%{view: :local}), do: {" Files ", "No media files in this directory."}
-  defp videos_labels(_state), do: {" Latest videos ", "No videos in this channel."}
+  defp videos_labels(%{video_tab: :streams}), do: {" Streams ", "No streams in this channel."}
+  defp videos_labels(_state), do: {" Videos ", "No videos in this channel."}
+
+  # The Status-column label for a stream row's live state. `:none` (a regular
+  # upload that happens to sit on the Streams tab) shows blank rather than a badge.
+  defp live_badge(:live), do: "LIVE"
+  defp live_badge(:ended), do: "ENDED"
+  defp live_badge(:upcoming), do: "SOON"
+  defp live_badge(_none), do: ""
 
   defp table_or_empty([], _header, _widths, _selected, title, empty_text) do
     %Paragraph{
@@ -442,6 +463,16 @@ defmodule Playmark.TUI.View do
   # footer drops the bookmark hint.
   defp footer_content(%{mode: :videos, view: :local}),
     do: {"j/k | Enter: play | e: queue | Q: manage | H: history | Esc: back | q: quit", :white}
+
+  # A subscription listing (channel_url set) can flip between the channel's Videos
+  # and Streams tabs — show the toggle for whichever tab isn't current. A search
+  # listing has no channel URL and falls through to the general clause below.
+  defp footer_content(%{mode: :videos, channel_url: url, video_tab: tab}) when is_binary(url) do
+    toggle = if tab == :streams, do: "v: videos", else: "s: streams"
+
+    {"j/k | Enter: play | b: bookmark | e: queue | #{toggle} | Q: manage | H: history | Esc: back | q: quit",
+     :white}
+  end
 
   defp footer_content(%{mode: :videos}),
     do:

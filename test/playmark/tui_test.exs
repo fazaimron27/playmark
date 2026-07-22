@@ -57,17 +57,18 @@ end
 
 defmodule Playmark.TUITest.TestChannel do
   @moduledoc """
-  A stub for the TUI's channel seam. `list_videos/1` announces itself to the
-  test process (handing it the task pid) and blocks until the test sends the
-  videos to return, so a test can observe the non-blocking `:loading` state
-  before the list arrives. `name/1` returns a fixed name without shelling out.
+  A stub for the TUI's channel seam. `list_videos/2` announces itself and the tab
+  it was asked for to the test process (handing it the task pid) and blocks until
+  the test sends the videos to return, so a test can observe the non-blocking
+  `:loading` state before the list arrives, and assert which tab was fetched.
+  `name/1` returns a fixed name without shelling out.
   """
 
   def name(_url), do: {:ok, "Stub Channel"}
 
-  def list_videos(_url, _limit \\ 30) do
+  def list_videos(_url, tab \\ :videos) do
     test_pid = Application.get_env(:playmark, :test_channel_pid)
-    send(test_pid, {__MODULE__, self()})
+    send(test_pid, {__MODULE__, self(), tab})
 
     receive do
       {:videos, videos} -> {:ok, videos}
@@ -561,7 +562,7 @@ defmodule Playmark.TUITest do
       assert {:info, _} = state.status
 
       # The task called the stub, which announced itself and blocks.
-      assert_receive {TestChannel, task}, 1_000
+      assert_receive {TestChannel, task, :videos}, 1_000
       send(task, {:videos, [%{id: "x", title: "Vid X", url: "https://youtu.be/x"}]})
     end
 
@@ -570,20 +571,27 @@ defmodule Playmark.TUITest do
       :sys.replace_state(pid, fn s -> %{s | user_state: %{s.user_state | mode: :loading}} end)
 
       videos = [%{id: "x", title: "Vid X", url: "https://youtu.be/x"}]
-      send(pid, {:videos_result, {:ok, videos}, "Channel A"})
+      send(pid, {:videos_result, {:ok, videos}, "Channel A", "https://youtube.com/@a", :videos})
       _ = :sys.get_state(pid)
 
       state = user_state(pid)
       assert state.mode == :videos
       assert state.videos == videos
       assert state.channel_name == "Channel A"
+      assert state.channel_url == "https://youtube.com/@a"
+      assert state.video_tab == :videos
     end
 
     test "a videos_result error returns to list mode" do
       pid = start_tui()
       :sys.replace_state(pid, fn s -> %{s | user_state: %{s.user_state | mode: :loading}} end)
 
-      send(pid, {:videos_result, {:error, "yt-dlp failed"}, "Channel A"})
+      send(
+        pid,
+        {:videos_result, {:error, "yt-dlp failed"}, "Channel A", "https://youtube.com/@a",
+         :videos}
+      )
+
       _ = :sys.get_state(pid)
 
       state = user_state(pid)
@@ -602,7 +610,12 @@ defmodule Playmark.TUITest do
     test "a late videos_result after cancel is dropped" do
       pid = start_tui()
       # mode is :list (canceled), not :loading
-      send(pid, {:videos_result, {:ok, [%{id: "x", title: "X", url: "u"}]}, "A"})
+      send(
+        pid,
+        {:videos_result, {:ok, [%{id: "x", title: "X", url: "u"}]}, "A", "https://youtube.com/@a",
+         :videos}
+      )
+
       _ = :sys.get_state(pid)
 
       state = user_state(pid)
@@ -631,6 +644,128 @@ defmodule Playmark.TUITest do
       assert state.mode == :list
       assert state.view == :subscriptions
       assert state.videos == []
+    end
+
+    test "s from a subscription :videos listing re-fetches the streams tab" do
+      pid = start_tui()
+
+      :sys.replace_state(pid, fn s ->
+        %{
+          s
+          | user_state: %{
+              s.user_state
+              | view: :subscriptions,
+                mode: :videos,
+                videos: [%{id: "x", title: "Vid X", url: "u", live: :none}],
+                channel_name: "Channel A",
+                channel_url: "https://youtube.com/@a",
+                video_tab: :videos
+            }
+        }
+      end)
+
+      press(pid, "s")
+
+      # The switch drops into :loading and the stub is asked for the :streams tab.
+      assert user_state(pid).mode == :loading
+      assert_receive {TestChannel, task, :streams}, 1_000
+
+      streams = [%{id: "s1", title: "Live Now", url: "u1", live: :live}]
+      send(task, {:videos, streams})
+      _ = :sys.get_state(pid)
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert state.video_tab == :streams
+      assert state.videos == streams
+    end
+
+    test "v flips a streams listing back to the videos tab" do
+      pid = start_tui()
+
+      :sys.replace_state(pid, fn s ->
+        %{
+          s
+          | user_state: %{
+              s.user_state
+              | view: :subscriptions,
+                mode: :videos,
+                videos: [%{id: "s1", title: "Live", url: "u", live: :live}],
+                channel_name: "Channel A",
+                channel_url: "https://youtube.com/@a",
+                video_tab: :streams
+            }
+        }
+      end)
+
+      press(pid, "v")
+
+      assert user_state(pid).mode == :loading
+      assert_receive {TestChannel, task, :videos}, 1_000
+      send(task, {:videos, [%{id: "x", title: "Upload", url: "u2", live: :none}]})
+      _ = :sys.get_state(pid)
+
+      assert user_state(pid).video_tab == :videos
+    end
+
+    test "s on the current tab is a no-op (no re-fetch)" do
+      pid = start_tui()
+
+      :sys.replace_state(pid, fn s ->
+        %{
+          s
+          | user_state: %{
+              s.user_state
+              | view: :subscriptions,
+                mode: :videos,
+                videos: [%{id: "s1", title: "Live", url: "u", live: :live}],
+                channel_name: "Channel A",
+                channel_url: "https://youtube.com/@a",
+                video_tab: :streams
+            }
+        }
+      end)
+
+      press(pid, "s")
+
+      # Already on :streams — stays in :videos, never enters :loading, no stub call.
+      assert user_state(pid).mode == :videos
+      refute_receive {TestChannel, _task, _tab}, 200
+    end
+
+    test "on a subscription listing keeps the current list when a tab switch fails" do
+      pid = start_tui()
+
+      videos = [%{id: "x", title: "Vid X", url: "u", live: :none}]
+
+      :sys.replace_state(pid, fn s ->
+        %{
+          s
+          | user_state: %{
+              s.user_state
+              | view: :subscriptions,
+                mode: :loading,
+                videos: videos,
+                channel_name: "Channel A",
+                channel_url: "https://youtube.com/@a",
+                video_tab: :videos
+            }
+        }
+      end)
+
+      send(
+        pid,
+        {:videos_result, {:error, "yt-dlp failed"}, "Channel A", "https://youtube.com/@a",
+         :streams}
+      )
+
+      _ = :sys.get_state(pid)
+
+      state = user_state(pid)
+      # Error surfaced, but the previously-shown list stays on screen.
+      assert state.mode == :videos
+      assert state.videos == videos
+      assert {:error, _} = state.status
     end
 
     test "b in :videos mode bookmarks the selected video" do
@@ -741,6 +876,37 @@ defmodule Playmark.TUITest do
       # The query stands in for the channel-name label.
       assert state.channel_name == "today's news"
       assert {:info, "1 results for today's news"} = state.status
+      # A search listing has no channel URL, so s/v can't switch tabs on it.
+      assert state.channel_url == nil
+    end
+
+    test "s is a no-op on a search listing (no channel_url to switch)" do
+      pid = start_tui()
+
+      videos = [%{id: "x", title: "Vid X", url: "u"}]
+
+      :sys.replace_state(pid, fn s ->
+        %{
+          s
+          | user_state: %{
+              s.user_state
+              | view: :search,
+                mode: :videos,
+                videos: videos,
+                channel_name: "today's news",
+                channel_url: nil,
+                video_tab: :videos
+            }
+        }
+      end)
+
+      press(pid, "s")
+
+      state = user_state(pid)
+      # Stays put: no channel URL means no tab to fetch.
+      assert state.mode == :videos
+      assert state.videos == videos
+      assert state.video_tab == :videos
     end
 
     test "an empty search_result reports no results but still enters :videos mode" do
@@ -818,6 +984,59 @@ defmodule Playmark.TUITest do
 
       assert Enum.member?(titles, " Search results ")
       refute Enum.member?(titles, " Latest videos ")
+    end
+
+    test "the streams tab renders a Status column with live badges" do
+      state = %{
+        view: :subscriptions,
+        mode: :videos,
+        bookmarks: [],
+        subscriptions: [],
+        videos: [
+          %{id: "a", title: "Live Now", url: "u1", live: :live},
+          %{id: "b", title: "Past Stream", url: "u2", live: :ended},
+          %{id: "c", title: "Scheduled", url: "u3", live: :upcoming},
+          %{id: "d", title: "Plain Upload", url: "u4", live: :none}
+        ],
+        channel_name: "Channel A",
+        channel_url: "https://youtube.com/@a",
+        video_tab: :streams,
+        selected: 0,
+        input: nil,
+        status: nil
+      }
+
+      widgets = TUI.render(state, %ExRatatui.Frame{width: 80, height: 24})
+      titles = block_titles(widgets)
+      rows = table_rows(widgets)
+
+      # The panel is titled "Streams", and each row carries its status badge.
+      assert Enum.member?(titles, " Streams ")
+      assert Enum.member?(rows, ["Live Now", "LIVE"])
+      assert Enum.member?(rows, ["Past Stream", "ENDED"])
+      assert Enum.member?(rows, ["Scheduled", "SOON"])
+      # A regular upload on the streams tab shows a blank badge, not a label.
+      assert Enum.member?(rows, ["Plain Upload", ""])
+    end
+
+    test "the videos tab renders a single Title column (no Status badges)" do
+      state = %{
+        view: :subscriptions,
+        mode: :videos,
+        bookmarks: [],
+        subscriptions: [],
+        videos: [%{id: "a", title: "Some Video", url: "u1", live: :none}],
+        channel_name: "Channel A",
+        channel_url: "https://youtube.com/@a",
+        video_tab: :videos,
+        selected: 0,
+        input: nil,
+        status: nil
+      }
+
+      widgets = TUI.render(state, %ExRatatui.Frame{width: 80, height: 24})
+      assert Enum.member?(block_titles(widgets), " Videos ")
+      assert Enum.member?(table_rows(widgets), ["Some Video"])
     end
   end
 
@@ -1633,6 +1852,16 @@ defmodule Playmark.TUITest do
         title = Map.get(block, :title),
         is_binary(title),
         do: title
+  end
+
+  # The row cells of every Table widget rendered this frame, flattened across
+  # tables so a test can assert a given row (e.g. ["Live Now", "LIVE"]) appears.
+  defp table_rows(widgets) do
+    for {widget, _rect} <- widgets,
+        rows = Map.get(widget, :rows),
+        is_list(rows),
+        row <- rows,
+        do: row
   end
 
   # Real unique-constraint error changesets: insert a row, then attempt a
