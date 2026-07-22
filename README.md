@@ -86,7 +86,8 @@ never stored, so it's always current.
 
 - `a` — add a subscription: paste a channel URL (e.g.
   `https://www.youtube.com/@handle`), `Enter` resolves the channel name
-  and saves it
+  and saves it. A pasted tab suffix (`/videos`, `/streams`, `/shorts`, …) is
+  stripped, so `.../@handle/videos` and `.../@handle` are the same subscription
 - `d` — unsubscribe from the selected channel (`y` confirms, any other key cancels)
 - `Enter` — open the channel and list its latest videos
 - `Tab` — cycle to search
@@ -116,6 +117,11 @@ In a video list (a channel's videos, search results, or a directory's files):
 - `b` — bookmark the selected video (subscriptions, search, and bookmarks stay
   separate; playing from a subscription or search does not auto-bookmark; local
   files can't be bookmarked)
+- `s` / `v` — when browsing a subscription, flip the list between the channel's
+  **Streams** and **Videos** tabs, mirroring YouTube's own channel tabs. The
+  Streams tab shows a status badge per row — `LIVE` (broadcasting now), `ENDED`
+  (a past broadcast), or `SOON` (scheduled) — and playing a live entry joins at
+  the live edge. (No effect on search results or local files.)
 - `Esc` — back to the view it was opened from
 
 The player closes back to the list when the video ends. Every fetch, channel
