@@ -2053,6 +2053,236 @@ defmodule Playmark.TUITest do
     end
   end
 
+  describe "filter" do
+    defp seed_bookmarks do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/1", title: "Elixir Basics", channel: "Alpha"})
+
+      Repo.insert!(%Bookmark{
+        url: "https://youtu.be/2",
+        title: "Erlang Deep Dive",
+        channel: "Beta"
+      })
+
+      Repo.insert!(%Bookmark{
+        url: "https://youtu.be/3",
+        title: "Phoenix LiveView",
+        channel: "Alpha"
+      })
+    end
+
+    test "\"/\" enters :filter mode from a browse list" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      press(pid, "/")
+      assert user_state(pid).mode == :filter
+      assert user_state(pid).filter_return == :list
+    end
+
+    test "typing narrows the current list and clamps the selection" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      # Move down first, then filter to a single match — selection must clamp.
+      press(pid, "j")
+      press(pid, "j")
+      assert user_state(pid).selected == 2
+
+      press(pid, "/")
+      type(pid, "elixir")
+
+      state = user_state(pid)
+      assert state.filter == "elixir"
+      # Only "Elixir Basics" survives, so selection clamps to 0.
+      assert state.selected == 0
+    end
+
+    test "matching is case-insensitive across the secondary column" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      press(pid, "/")
+      type(pid, "ALPHA")
+
+      # Filter runs over [:title, :channel]; two rows have channel "Alpha".
+      assert Playmark.TUI.Filter.visible(user_state(pid)) |> length() == 2
+    end
+
+    test "backspace shortens the term and re-widens the list" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      press(pid, "/")
+      type(pid, "erlang")
+      assert Playmark.TUI.Filter.visible(user_state(pid)) |> length() == 1
+
+      press(pid, "backspace")
+      assert user_state(pid).filter == "erlan"
+    end
+
+    test "Enter closes the field keeping the term" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      press(pid, "/")
+      type(pid, "elixir")
+      press(pid, "enter")
+
+      state = user_state(pid)
+      assert state.mode == :list
+      assert state.filter == "elixir"
+    end
+
+    test "Esc closes the field keeping the term" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      press(pid, "/")
+      type(pid, "elixir")
+      press(pid, "esc")
+
+      state = user_state(pid)
+      assert state.mode == :list
+      assert state.filter == "elixir"
+    end
+
+    test "reopening the field prefills the current term" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      press(pid, "/")
+      type(pid, "eli")
+      press(pid, "esc")
+      press(pid, "/")
+
+      assert user_state(pid).filter == "eli"
+    end
+
+    test "Esc in the base list clears an active filter" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      press(pid, "/")
+      type(pid, "elixir")
+      press(pid, "enter")
+      assert user_state(pid).filter == "elixir"
+
+      press(pid, "esc")
+      state = user_state(pid)
+      assert state.filter == ""
+      assert state.selected == 0
+    end
+
+    test "Enter plays the filtered selection, not the unfiltered one" do
+      Application.put_env(:playmark, :playback_impl, TestPlayback)
+      Application.put_env(:playmark, :test_playback_pid, self())
+
+      on_exit(fn ->
+        Application.delete_env(:playmark, :playback_impl)
+        Application.delete_env(:playmark, :test_playback_pid)
+      end)
+
+      seed_bookmarks()
+      pid = start_tui()
+
+      # Filter to the single "Phoenix" row; it becomes index 0 of the filtered list.
+      press(pid, "/")
+      type(pid, "phoenix")
+      press(pid, "enter")
+      press(pid, "enter")
+
+      state = user_state(pid)
+      assert state.mode == :playing
+      # The panel is seeded from the selected item — proving Enter resolved the
+      # filtered selection ("Phoenix LiveView"), not the original index-0 row.
+      assert state.playing.title == "Phoenix LiveView"
+
+      assert_receive {TestPlayback, play_task}, 1_000
+      send(play_task, :close)
+    end
+
+    test "d deletes the filtered selection" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      press(pid, "/")
+      type(pid, "phoenix")
+      press(pid, "enter")
+      press(pid, "d")
+      press(pid, "y")
+
+      titles = Enum.map(user_state(pid).bookmarks, & &1.title)
+      refute "Phoenix LiveView" in titles
+      assert "Elixir Basics" in titles
+    end
+
+    test "Tab resets an active filter" do
+      seed_bookmarks()
+      pid = start_tui()
+
+      press(pid, "/")
+      type(pid, "elixir")
+      press(pid, "enter")
+      assert user_state(pid).filter == "elixir"
+
+      press(pid, "tab")
+      assert user_state(pid).filter == ""
+    end
+
+    test "\"/\" is still the search prompt in the search view" do
+      pid = start_tui()
+      press(pid, "tab")
+      press(pid, "tab")
+      assert user_state(pid).view == :search
+
+      press(pid, "/")
+      # Search takes a query prompt, not the list filter.
+      assert user_state(pid).mode == :input
+    end
+
+    test "leaving a channel's video list resets the filter" do
+      pid = start_tui()
+
+      videos = [%{id: "a", title: "One", url: "u1"}, %{id: "b", title: "Two", url: "u2"}]
+
+      :sys.replace_state(pid, fn s ->
+        %{
+          s
+          | user_state: %{
+              s.user_state
+              | view: :subscriptions,
+                mode: :videos,
+                videos: videos,
+                channel_name: "Chan",
+                filter: "one"
+            }
+        }
+      end)
+
+      # First Esc clears the filter (stays in :videos), second leaves the list.
+      press(pid, "esc")
+      assert user_state(pid).mode == :videos
+      assert user_state(pid).filter == ""
+
+      press(pid, "esc")
+      assert user_state(pid).mode == :list
+    end
+
+    test "a fresh video result clears any leftover filter term" do
+      pid = start_tui()
+
+      :sys.replace_state(pid, fn s ->
+        %{s | user_state: %{s.user_state | mode: :loading, filter: "stale"}}
+      end)
+
+      videos = [%{id: "x", title: "Vid X", url: "u"}]
+      send(pid, {:videos_result, {:ok, videos}, "Chan", "https://youtube.com/@c", :videos})
+      _ = :sys.get_state(pid)
+
+      assert user_state(pid).filter == ""
+    end
+  end
+
   defp duplicate_playlist_changeset do
     path = "/tmp/playmark-dup-dir"
     Repo.insert!(%Playmark.Playlist{path: path, name: "dir"})

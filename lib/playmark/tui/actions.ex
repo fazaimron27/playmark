@@ -14,6 +14,8 @@ defmodule Playmark.TUI.Actions do
 
   alias ExRatatui.Event
 
+  alias Playmark.TUI.Filter
+
   alias Playmark.{
     Bookmarks,
     Channel,
@@ -38,7 +40,7 @@ defmodule Playmark.TUI.Actions do
   # Search opens its query prompt with "/" (it takes a query, not a URL); the
   # other views add with "a". Each key is a no-op in the wrong view.
   def handle_list_key("/", %{view: :search} = state), do: {:noreply, start_input(state)}
-  def handle_list_key("/", state), do: {:noreply, state}
+  def handle_list_key("/", state), do: {:noreply, open_filter(state)}
   def handle_list_key("a", %{view: :search} = state), do: {:noreply, state}
   def handle_list_key("a", state), do: {:noreply, start_input(state)}
   def handle_list_key("d", state), do: {:noreply, confirm_delete_selected(state)}
@@ -46,6 +48,10 @@ defmodule Playmark.TUI.Actions do
   # "e" appends the selected item to the playback queue. A no-op in views with no
   # selectable list here (search has none in :list mode) via enqueue_selected/1.
   def handle_list_key("e", state), do: {:noreply, enqueue_selected(state)}
+  # Esc clears an active filter (there's otherwise no Esc binding in :list); with
+  # no filter it's a no-op. See open_filter/1 and handle_filter_key/2.
+  def handle_list_key("esc", %{filter: ""} = state), do: {:noreply, state}
+  def handle_list_key("esc", state), do: {:noreply, %{state | filter: "", selected: 0}}
   def handle_list_key(_code, state), do: {:noreply, state}
 
   # Tab cycles the four top-level views. Clear any video list / channel label
@@ -60,7 +66,7 @@ defmodule Playmark.TUI.Actions do
         :local -> :bookmarks
       end
 
-    %{state | view: next, videos: [], channel_name: nil, selected: 0, status: nil}
+    %{state | view: next, videos: [], channel_name: nil, selected: 0, status: nil, filter: ""}
   end
 
   defp start_input(state) do
@@ -209,9 +215,17 @@ defmodule Playmark.TUI.Actions do
   def handle_videos_key("s", state), do: {:noreply, switch_tab(state, :streams)}
   def handle_videos_key("v", state), do: {:noreply, switch_tab(state, :videos)}
 
-  # Back to the list we came from. The view is unchanged — a video list is only
+  # "/" opens the incremental filter over the current video list (see open_filter/1).
+  def handle_videos_key("/", state), do: {:noreply, open_filter(state)}
+
+  # Esc first clears an active filter (staying in :videos); with no filter it goes
+  # back to the list we came from. The view is unchanged — a video list is only
   # ever opened from Subscriptions, Search, or Local — so keep it, clearing the
   # results.
+  def handle_videos_key("esc", %{filter: filter} = state) when filter != "" do
+    {:noreply, %{state | filter: "", selected: 0}}
+  end
+
   def handle_videos_key("esc", state) do
     {:noreply,
      %{
@@ -222,11 +236,48 @@ defmodule Playmark.TUI.Actions do
          channel_url: nil,
          video_tab: :videos,
          selected: 0,
-         status: nil
+         status: nil,
+         filter: ""
      }}
   end
 
   def handle_videos_key(_code, state), do: {:noreply, state}
+
+  # --- filter mode ---------------------------------------------------------
+
+  # Open the incremental filter field over the current browse list, remembering
+  # the base mode to restore when it closes (:list or :videos). The current
+  # `filter` term is kept, so reopening the field prefills it for editing.
+  defp open_filter(state) do
+    %{state | mode: :filter, filter_return: state.mode}
+  end
+
+  # Live filter over the current list: printable keys append to the term,
+  # backspace deletes, Enter/Esc close the field keeping the term (an empty term
+  # is no filter). After every term change the selection is reclamped into the
+  # newly-narrowed list so it can never point past the last visible row.
+  def handle_filter_key("enter", state), do: {:noreply, %{state | mode: state.filter_return}}
+  def handle_filter_key("esc", state), do: {:noreply, %{state | mode: state.filter_return}}
+
+  def handle_filter_key("backspace", state) do
+    filter = String.slice(state.filter, 0..-2//1)
+    {:noreply, reclamp_filtered(%{state | filter: filter})}
+  end
+
+  def handle_filter_key(code, state) do
+    # A printable key is a single grapheme (letters, digits, space, punctuation);
+    # named keys ("left", "f5", …) are longer and ignored.
+    if String.length(code) == 1 do
+      {:noreply, reclamp_filtered(%{state | filter: state.filter <> code})}
+    else
+      {:noreply, state}
+    end
+  end
+
+  # Keep `selected` within the filtered list after the term changes.
+  defp reclamp_filtered(state) do
+    %{state | selected: clamp(state.selected, 0, max(length(current_list(state)) - 1, 0))}
+  end
 
   # --- input mode ----------------------------------------------------------
 
@@ -262,15 +313,13 @@ defmodule Playmark.TUI.Actions do
     end
   end
 
-  # The list the selection currently points into, given view + mode. The
-  # queue-manage modal navigates its own list via `queue_selected` (see
-  # handle_queue_key/2), so it isn't represented here.
-  defp current_list(%{mode: :videos, videos: videos}), do: videos
-  defp current_list(%{view: :bookmarks, bookmarks: bookmarks}), do: bookmarks
-  defp current_list(%{view: :subscriptions, subscriptions: subscriptions}), do: subscriptions
-  defp current_list(%{view: :local, playlists: playlists}), do: playlists
-  # The search view holds no list in :list mode — results live in :videos mode.
-  defp current_list(%{view: :search}), do: []
+  # The list the selection currently points into, given view + mode, narrowed by
+  # the active filter term. Delegates to `Playmark.TUI.Filter.visible/1` — the
+  # single place the view/mode→list mapping lives, shared with the view so what's
+  # navigated and what's rendered can never diverge. The queue-manage modal
+  # navigates its own list via `queue_selected` (see handle_queue_key/2), so it
+  # isn't represented here.
+  defp current_list(state), do: Filter.visible(state)
 
   defp selected_item(state) do
     Enum.at(current_list(state), state.selected)

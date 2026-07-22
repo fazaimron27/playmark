@@ -15,6 +15,11 @@ defmodule Playmark.TUI do
     * `:input`    — type into a `TextInput`. `Enter` submits, `Esc` cancels.
                     Adds a bookmark, adds a subscription, or runs a YouTube
                     search depending on the active view.
+    * `:filter`   — type an incremental filter over the current browse list
+                    (`:list` for bookmarks/subscriptions/local, or `:videos`).
+                    Opened with `/`; the list narrows as you type. `Enter`/`Esc`
+                    close the field keeping the term; in the base mode `Esc`
+                    clears an active filter. `/` in Search stays the query prompt.
     * `:fetching` — a background task is adding a bookmark/subscription.
     * `:loading`  — a background task is listing a channel's videos or running a
                     search.
@@ -100,6 +105,10 @@ defmodule Playmark.TUI do
        confirm: nil,
        confirm_return: :list,
        input: input,
+       # The active incremental filter term (empty = no filter) and the mode to
+       # restore when the filter field closes (:list or :videos).
+       filter: "",
+       filter_return: :list,
        status: nil,
        playing: nil
      }}
@@ -156,6 +165,12 @@ defmodule Playmark.TUI do
 
   def handle_event(%Event.Key{} = key, %{mode: :input} = state) do
     Actions.handle_input_key(key, state)
+  end
+
+  # Incremental filter over the current browse list: printable keys append to the
+  # term, backspace deletes, Enter/Esc close the field keeping the term.
+  def handle_event(%Event.Key{} = key, %{mode: :filter} = state) do
+    Actions.handle_filter_key(key.code, state)
   end
 
   # Esc bails out of a background add/list that's taking too long. The task keeps
@@ -254,6 +269,7 @@ defmodule Playmark.TUI do
          channel_url: url,
          video_tab: tab,
          selected: 0,
+         filter: "",
          status: status
      }}
   end
@@ -297,6 +313,7 @@ defmodule Playmark.TUI do
          channel_url: nil,
          video_tab: :videos,
          selected: 0,
+         filter: "",
          status: status
      }}
   end
@@ -327,6 +344,7 @@ defmodule Playmark.TUI do
          channel_url: nil,
          video_tab: :videos,
          selected: 0,
+         filter: "",
          status: status
      }}
   end
