@@ -25,14 +25,41 @@ defmodule Playmark.ChannelTest do
              ] = Channel.parse_videos(output)
     end
 
+    test "parses the live_status field into a :live tag" do
+      output =
+        "a\x1FLive now\x1Fis_live\n" <>
+          "b\x1FPast stream\x1Fwas_live\n" <>
+          "c\x1FPost-live processing\x1Fpost_live\n" <>
+          "d\x1FScheduled\x1Fis_upcoming\n" <>
+          "e\x1FRegular upload\x1Fnot_live\n"
+
+      assert [
+               %{id: "a", live: :live},
+               %{id: "b", live: :ended},
+               %{id: "c", live: :ended},
+               %{id: "d", live: :upcoming},
+               %{id: "e", live: :none}
+             ] = Channel.parse_videos(output)
+    end
+
+    test "treats an unknown or NA status as :none" do
+      output = "a\x1FTitle\x1FNA\nb\x1FTitle\x1Fsomething_new\n"
+      assert [%{live: :none}, %{live: :none}] = Channel.parse_videos(output)
+    end
+
+    test "falls back to :none for a legacy 2-field line (no status column)" do
+      output = "abc123\x1FReal Title\n"
+      assert [%{id: "abc123", title: "Real Title", live: :none}] = Channel.parse_videos(output)
+    end
+
     test "drops lines without the separator (e.g. yt-dlp warnings)" do
-      output = "WARNING: yt-dlp is out of date\nabc123\x1FReal Title\n"
+      output = "WARNING: yt-dlp is out of date\nabc123\x1FReal Title\x1Fnot_live\n"
 
       assert [%{id: "abc123", title: "Real Title"}] = Channel.parse_videos(output)
     end
 
     test "keeps titles that themselves contain separators or punctuation" do
-      output = "id1\x1FA title | with: punctuation & symbols\n"
+      output = "id1\x1FA title | with: punctuation & symbols\x1Fnot_live\n"
 
       assert [%{id: "id1", title: "A title | with: punctuation & symbols"}] =
                Channel.parse_videos(output)
@@ -106,6 +133,23 @@ defmodule Playmark.ChannelTest do
 
     test "returns [] for an empty list without calling oEmbed" do
       assert Channel.enrich_titles([]) == []
+    end
+
+    test "preserves the :live tag while replacing the title" do
+      videos = [
+        %{id: "a", title: "Flat A", url: "https://youtu.be/a", live: :live},
+        %{id: "b", title: "Flat B", url: "https://youtu.be/b", live: :none}
+      ]
+
+      StubMetadata.set(%{
+        "https://youtu.be/a" => {:ok, %{title: "Original A", channel: "C"}},
+        "https://youtu.be/b" => {:ok, %{title: "Original B", channel: "C"}}
+      })
+
+      assert [
+               %{id: "a", title: "Original A", live: :live},
+               %{id: "b", title: "Original B", live: :none}
+             ] = Channel.enrich_titles(videos)
     end
 
     test "serves repeat lookups from the cache without re-fetching" do

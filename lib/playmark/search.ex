@@ -67,7 +67,7 @@ defmodule Playmark.Search do
       socket_timeout(),
       "--flat-playlist",
       "--print",
-      "%(id)s#{@sep}%(title)s",
+      "%(id)s#{@sep}%(title)s#{@sep}%(live_status)s",
       "ytsearch#{limit}:#{query}"
     ]
   end
