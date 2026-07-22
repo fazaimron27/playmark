@@ -43,4 +43,49 @@ defmodule Playmark.YouTubeTest do
       assert {:error, _} = YouTube.validate("youtube.com/watch?v=x")
     end
   end
+
+  describe "canonical_channel_url/1" do
+    test "strips a trailing channel-tab segment" do
+      assert YouTube.canonical_channel_url("https://www.youtube.com/@AmmarTV/videos") ==
+               "https://www.youtube.com/@AmmarTV"
+
+      assert YouTube.canonical_channel_url("https://www.youtube.com/@AmmarTV/streams") ==
+               "https://www.youtube.com/@AmmarTV"
+
+      assert YouTube.canonical_channel_url("https://www.youtube.com/@AmmarTV/shorts") ==
+               "https://www.youtube.com/@AmmarTV"
+    end
+
+    test "strips a trailing tab from a /channel/UC… URL too" do
+      assert YouTube.canonical_channel_url("https://www.youtube.com/channel/UCabc/streams") ==
+               "https://www.youtube.com/channel/UCabc"
+    end
+
+    test "leaves an already-bare channel URL unchanged" do
+      url = "https://www.youtube.com/@AmmarTV"
+      assert YouTube.canonical_channel_url(url) == url
+    end
+
+    test "does not strip a non-tab final segment" do
+      url = "https://www.youtube.com/@AmmarTV/somethingelse"
+      assert YouTube.canonical_channel_url(url) == url
+    end
+
+    test "leaves watch and short links unchanged (v/live are not stripped mid-URL)" do
+      watch = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      short = "https://youtu.be/dQw4w9WgXcQ"
+      assert YouTube.canonical_channel_url(watch) == watch
+      assert YouTube.canonical_channel_url(short) == short
+    end
+
+    test "is idempotent — canonicalizing a canonical URL is a no-op" do
+      once = YouTube.canonical_channel_url("https://www.youtube.com/@AmmarTV/videos")
+      assert YouTube.canonical_channel_url(once) == once
+    end
+
+    test "returns non-string input as-is" do
+      assert YouTube.canonical_channel_url(nil) == nil
+      assert YouTube.canonical_channel_url(123) == 123
+    end
+  end
 end

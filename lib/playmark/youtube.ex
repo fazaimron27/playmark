@@ -19,6 +19,11 @@ defmodule Playmark.YouTube do
   # short-link host; the `music.`/`m.` subdomains appear on shared links.
   @hosts ~w(youtube.com www.youtube.com m.youtube.com music.youtube.com youtu.be)
 
+  # The channel-page tab segments YouTube appends to a channel URL (Videos,
+  # Streams, Shorts, etc.). We strip a trailing one so a subscription stores the
+  # canonical bare channel URL, and the app decides which tab to fetch.
+  @channel_tabs ~w(videos streams shorts featured live playlists community)
+
   @doc """
   Validates that `url` is an `http(s)` URL on a YouTube host.
 
@@ -34,6 +39,53 @@ defmodule Playmark.YouTube do
 
       _ ->
         {:error, "not a YouTube URL — paste a full https:// link"}
+    end
+  end
+
+  @doc """
+  Strips a trailing channel-tab segment (`/videos`, `/streams`, `/shorts`, …)
+  from a channel URL, returning the canonical bare channel URL.
+
+  A channel page has separate tabs (Videos, Streams, …) that yt-dlp treats as
+  distinct playlists; pasting `.../@handle/videos` would otherwise be stored and
+  re-fetched as that exact tab forever, differing from `.../@handle`. Normalizing
+  on add lets the app hold one canonical URL and choose the tab itself (see
+  `Playmark.Channel.list_videos/3`).
+
+  Deliberately conservative: only a known tab word as the *final* path segment is
+  removed (with any trailing slash). Watch links (`watch?v=`, `youtu.be/ID`) and
+  already-bare channel URLs pass through unchanged, and the host is never
+  rewritten. Non-string or unparseable input is returned as-is for the caller's
+  validation to reject.
+  """
+  def canonical_channel_url(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{path: path} = uri when is_binary(path) ->
+        stripped = strip_tab_segment(path)
+        uri |> Map.put(:path, stripped) |> URI.to_string()
+
+      _ ->
+        url
+    end
+  end
+
+  def canonical_channel_url(url), do: url
+
+  # Drops a trailing "/<tab>" (or "/<tab>/") when <tab> is a known channel tab,
+  # preserving the rest of the path. A path without a trailing tab is returned
+  # unchanged.
+  defp strip_tab_segment(path) do
+    segments = String.split(path, "/", trim: true)
+
+    case Enum.reverse(segments) do
+      [last | rest] when last in @channel_tabs ->
+        case Enum.reverse(rest) do
+          [] -> "/"
+          kept -> "/" <> Enum.join(kept, "/")
+        end
+
+      _ ->
+        path
     end
   end
 end
