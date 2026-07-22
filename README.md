@@ -140,7 +140,7 @@ running player (`Q` is the only key playback accepts). In the queue manager:
 
 - `j` / `k` — move the selection
 - `[` / `]` — move the selected item up / down in play order
-- `d` — remove the selected item
+- `d` — remove the selected item (`y` confirms, any other key cancels)
 - `c` — clear the whole queue (`y` confirms, any other key cancels)
 - `Enter` — start playing from the top
 - `Esc` — close the manager, back to where you opened it from
@@ -150,6 +150,25 @@ end, is dropped from the queue, and the next one starts automatically — one
 player at a time, never two at once. If an item fails to play, the queue stops,
 shows the error, and drops you back into the queue manager with the remaining
 items intact so you can remove the offender and continue.
+
+### History
+
+Every time you play something, it's recorded to a persisted watch history — the
+moment playback begins, from anywhere (a bookmark, a channel's video, a search
+result, a local file, or the queue). Like the queue, history stores its entries
+outright, so it survives restarts. Replaying a video you've already watched just
+moves it back to the top rather than adding a duplicate.
+
+Open history with `H` from any list or video list (not over a running player).
+In the history view:
+
+- `j` / `k` — move the selection
+- `Enter` — replay the selected entry
+- `d` — remove the selected entry (`y` confirms, any other key cancels)
+- `c` — clear the whole history (`y` confirms, any other key cancels)
+- `Esc` — close, back to where you opened it from
+
+History is unbounded — it keeps everything until you clear it.
 
 ### Playback quality
 
