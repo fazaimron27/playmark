@@ -4,8 +4,9 @@ defmodule Playmark.TUI.View do
   `{widget, rect}` tuples. No side effects and no state transitions live here —
   everything is a function of the state map handed in by the runtime.
 
-  The layout gains a dedicated input row while adding (`:input`/`:fetching`);
-  every other mode uses the three-row header/body/footer split.
+  The layout gains a dedicated input row while adding (`:input`/`:fetching`) or
+  filtering (`:filter`); every other mode uses the three-row
+  header/body/footer split.
   """
 
   alias ExRatatui.Layout
@@ -13,10 +14,12 @@ defmodule Playmark.TUI.View do
   alias ExRatatui.Style
   alias ExRatatui.Widgets.{Block, Paragraph, Table, TextInput}
 
+  alias Playmark.TUI.Filter
+
   def render(state, frame) do
     area = %Rect{x: 0, y: 0, width: frame.width, height: frame.height}
 
-    if state.mode in [:input, :fetching] do
+    if state.mode in [:input, :fetching, :filter] do
       [header_area, body_area, input_area, footer_area] =
         Layout.split(area, :vertical, [{:length, 3}, {:min, 0}, {:length, 3}, {:length, 3}])
 
@@ -50,6 +53,9 @@ defmodule Playmark.TUI.View do
   # The queue-manage modal names itself, whatever base view it was opened over.
   defp section(%{mode: :queue_manage}), do: "Queue"
 
+  # The history modal likewise names itself, over whatever base view.
+  defp section(%{mode: :history}), do: "History"
+
   # While browsing a channel's videos — or playing one launched from that list —
   # show the channel name, matching the video-list body (see showing_videos?/1).
   defp section(%{channel_name: name} = state) when name != nil do
@@ -77,52 +83,89 @@ defmodule Playmark.TUI.View do
       state.mode == :confirm and confirm_over_queue?(state) ->
         queue_body(state)
 
+      state.mode == :confirm and confirm_over_history?(state) ->
+        history_body(state)
+
       state.mode == :queue_manage ->
         queue_body(state)
+
+      state.mode == :history ->
+        history_body(state)
 
       state.mode == :playing ->
         now_playing(state)
 
       showing_videos?(state) ->
         {title, empty_text} = videos_labels(state)
+        videos = Filter.visible(state)
+        title = filter_title(state, title, videos)
+        empty_text = filter_empty(state, empty_text)
+
+        # The Streams tab badges each row's live status (LIVE / ENDED / SOON); the
+        # Videos tab and search/local listings are plain title lists.
+        if Map.get(state, :video_tab) == :streams do
+          table_or_empty(
+            Enum.map(videos, &[&1.title, live_badge(&1.live)]),
+            ["Title", "Status"],
+            [{:percentage, 85}, {:percentage, 15}],
+            state.selected,
+            title,
+            empty_text
+          )
+        else
+          table_or_empty(
+            Enum.map(videos, &[&1.title]),
+            ["Title"],
+            [{:percentage, 100}],
+            state.selected,
+            title,
+            empty_text
+          )
+        end
+
+      base_view(state) == :bookmarks ->
+        bookmarks = Filter.visible(state)
 
         table_or_empty(
-          Enum.map(state.videos, &[&1.title]),
-          ["Title"],
-          [{:percentage, 100}],
-          state.selected,
-          title,
-          empty_text
-        )
-
-      state.view == :bookmarks ->
-        table_or_empty(
-          Enum.map(state.bookmarks, &[&1.title, &1.channel]),
+          Enum.map(bookmarks, &[&1.title, &1.channel]),
           ["Title", "Channel"],
           [{:percentage, 65}, {:percentage, 35}],
           state.selected,
-          " Bookmarks ",
-          "No bookmarks yet.\n\nPress \"a\" to add one, or Tab for subscriptions."
+          filter_title(state, " Bookmarks ", bookmarks),
+          filter_empty(
+            state,
+            "No bookmarks yet.\n\nPress \"a\" to add one, or Tab for subscriptions."
+          )
         )
 
-      state.view == :subscriptions ->
+      base_view(state) == :subscriptions ->
+        subscriptions = Filter.visible(state)
+
         table_or_empty(
-          Enum.map(state.subscriptions, &[&1.name, &1.url]),
+          Enum.map(subscriptions, &[&1.name, &1.url]),
           ["Channel", "URL"],
           [{:percentage, 40}, {:percentage, 60}],
           state.selected,
-          " Subscriptions ",
-          "No subscriptions yet.\n\nPress \"a\" to add a channel, or Tab for bookmarks."
+          filter_title(state, " Subscriptions ", subscriptions),
+          filter_empty(
+            state,
+            "No subscriptions yet.\n\nPress \"a\" to add a channel, or Tab for bookmarks."
+          )
         )
 
-      state.view == :local ->
+      base_view(state) == :local ->
+        playlists = Filter.visible(state)
+
         table_or_empty(
-          Enum.map(state.playlists, &[&1.name, &1.path]),
+          Enum.map(playlists, &[&1.name, &1.path]),
           ["Name", "Directory"],
           [{:percentage, 40}, {:percentage, 60}],
           state.selected,
-          " Local ",
-          "No local playlists yet.\n\nPress \"a\" to register a directory, or Tab for bookmarks."
+          filter_title(state, " Local ", playlists),
+          filter_empty(
+            state,
+            "No local playlists yet.\n\nPress \"a\" to register a directory, or Tab for bookmarks."
+          )
         )
 
       # Search holds no list in :list mode — results arrive in :videos mode,
@@ -155,6 +198,35 @@ defmodule Playmark.TUI.View do
   defp queue_source(%{local: true}), do: "local"
   defp queue_source(_item), do: "YouTube"
 
+  # The history modal's body: recent plays newest-first, with a "When" column
+  # (a relative age of played_at) so the recency the list is ordered by is visible.
+  defp history_body(state) do
+    table_or_empty(
+      Enum.map(state.history, &[&1.title, history_when(&1)]),
+      ["Title", "When"],
+      [{:percentage, 80}, {:percentage, 20}],
+      state.history_selected,
+      " History ",
+      "No history yet.\n\nPlay something to see it here."
+    )
+  end
+
+  # A compact relative age for a history item's played_at (e.g. "just now",
+  # "5m ago", "3h ago", "2d ago"). Uses whole units; falls back to a blank for a
+  # missing/odd timestamp so the column never crashes the renderer.
+  defp history_when(%{played_at: %DateTime{} = played_at}) do
+    secs = DateTime.diff(DateTime.utc_now(), played_at, :second)
+
+    cond do
+      secs < 60 -> "just now"
+      secs < 3600 -> "#{div(secs, 60)}m ago"
+      secs < 86_400 -> "#{div(secs, 3600)}h ago"
+      true -> "#{div(secs, 86_400)}d ago"
+    end
+  end
+
+  defp history_when(_item), do: ""
+
   # True when a confirmation is staged over the queue modal (clearing the queue),
   # so the body keeps showing the queue behind the prompt rather than the base
   # view. A list-delete confirmation (confirm_return: :list) falls through to the
@@ -162,12 +234,47 @@ defmodule Playmark.TUI.View do
   defp confirm_over_queue?(%{mode: :confirm, confirm_return: :queue_manage}), do: true
   defp confirm_over_queue?(_state), do: false
 
+  # True when a confirmation is staged over the history modal (clearing history), so
+  # the body keeps showing the history behind the prompt rather than the base view.
+  defp confirm_over_history?(%{mode: :confirm, confirm_return: :history}), do: true
+  defp confirm_over_history?(_state), do: false
+
   # True while browsing a channel's video list, and while a video launched from
   # that list is playing — so both the body and header keep showing the video
-  # list instead of the subscriptions list underneath the player.
+  # list instead of the subscriptions list underneath the player. While the
+  # filter field is open (:filter) the base mode is in filter_return, so a filter
+  # opened over :videos still renders the video list.
   defp showing_videos?(%{mode: :videos}), do: true
+  defp showing_videos?(%{mode: :filter, filter_return: :videos}), do: true
   defp showing_videos?(%{mode: :playing, videos: videos}), do: videos != []
   defp showing_videos?(_state), do: false
+
+  # The base view a body branch keys off. Unchanged by the filter field being
+  # open — only the runtime mode is :filter then, not the view.
+  defp base_view(%{view: view}), do: view
+
+  # When a filter term is active, append it and the shown/total count to the
+  # table title (e.g. `Bookmarks — "news" (3/12)`); otherwise leave the title as
+  # is. `shown` is the filtered list; the total comes from the unfiltered base.
+  defp filter_title(state, title, shown) do
+    case Map.get(state, :filter) || "" do
+      "" ->
+        title
+
+      term ->
+        total = length(Filter.base_list(state))
+        ~s|#{String.trim(title)} — "#{term}" (#{length(shown)}/#{total})|
+    end
+  end
+
+  # The empty-state text: with an active filter that matched nothing, say so
+  # rather than showing the "add your first item" hint; otherwise the given text.
+  defp filter_empty(state, empty_text) do
+    case Map.get(state, :filter) || "" do
+      "" -> empty_text
+      term -> ~s|No matches for "#{term}".|
+    end
+  end
 
   # The "Now playing" panel shown in :playing mode: the video title on top, then
   # the ordered steps for this play (seeded in Playmark.TUI.Actions) as a checklist
@@ -291,7 +398,15 @@ defmodule Playmark.TUI.View do
   # results; the active view says which, so the table title matches the header.
   defp videos_labels(%{view: :search}), do: {" Search results ", "No results."}
   defp videos_labels(%{view: :local}), do: {" Files ", "No media files in this directory."}
-  defp videos_labels(_state), do: {" Latest videos ", "No videos in this channel."}
+  defp videos_labels(%{video_tab: :streams}), do: {" Streams ", "No streams in this channel."}
+  defp videos_labels(_state), do: {" Videos ", "No videos in this channel."}
+
+  # The Status-column label for a stream row's live state. `:none` (a regular
+  # upload that happens to sit on the Streams tab) shows blank rather than a badge.
+  defp live_badge(:live), do: "LIVE"
+  defp live_badge(:ended), do: "ENDED"
+  defp live_badge(:upcoming), do: "SOON"
+  defp live_badge(_none), do: ""
 
   defp table_or_empty([], _header, _widths, _selected, title, empty_text) do
     %Paragraph{
@@ -340,6 +455,21 @@ defmodule Playmark.TUI.View do
     }
   end
 
+  # The filter field is a plain Paragraph, not a TextInput — the term lives in
+  # `state.filter` (a pure string the handlers edit), so rendering it needs no
+  # editor NIF and stays unit-testable. A block cursor caps the term.
+  defp input_widget(%{mode: :filter, filter: term}) do
+    %Paragraph{
+      text: "#{term}▏",
+      block: %Block{
+        title: " Filter ",
+        borders: [:all],
+        border_type: :rounded,
+        border_style: %Style{fg: :green}
+      }
+    }
+  end
+
   defp input_labels(:subscriptions),
     do: {" Add subscription — paste a channel URL ", "https://www.youtube.com/@handle/videos"}
 
@@ -384,35 +514,68 @@ defmodule Playmark.TUI.View do
   defp footer_content(%{mode: :fetching}), do: {"Working… (Esc to cancel)", :cyan}
   defp footer_content(%{mode: :loading}), do: {"Loading… (Esc to cancel)", :cyan}
 
+  # The filter field's own hints: typing narrows the list live, Enter/Esc close
+  # the field keeping the term (cleared later with Esc in the base mode).
+  defp footer_content(%{mode: :filter}),
+    do: {"type to filter | Enter/Esc: keep | backspace: edit", :white}
+
   # The queue-manage modal has its own key set; checked before the view-based
   # clauses because the base view is still whatever it was opened over.
   defp footer_content(%{mode: :queue_manage}),
     do: {"j/k | [/]: move | d: remove | c: clear | Enter: play | Esc: back", :white}
 
+  defp footer_content(%{mode: :history}),
+    do: {"j/k | d: remove | c: clear | Enter: play | Esc: back", :white}
+
   defp footer_content(%{mode: :playing}),
     do: {"The player controls playback — close it to return | Q: queue", :cyan}
+
+  # With an active filter, base modes surface the clear/edit keys instead of the
+  # full hint row (which is otherwise unreachable while filtering matters most).
+  # Checked before the per-view footers below, all of which assume no filter.
+  defp footer_content(%{filter: term} = state)
+       when term != "" and state.mode in [:list, :videos] do
+    {~s(filtering "#{term}" | /: edit | Esc: clear | j/k | Enter: select), :white}
+  end
 
   # Local files can't be bookmarked (no YouTube URL to look up), so its video
   # footer drops the bookmark hint.
   defp footer_content(%{mode: :videos, view: :local}),
-    do: {"j/k | Enter: play | e: queue | Q: manage | Esc: back | q: quit", :white}
+    do:
+      {"j/k | Enter: play | e: queue | /: filter | Q: manage | H: history | Esc: back | q: quit",
+       :white}
+
+  # A subscription listing (channel_url set) can flip between the channel's Videos
+  # and Streams tabs — show the toggle for whichever tab isn't current. A search
+  # listing has no channel URL and falls through to the general clause below.
+  defp footer_content(%{mode: :videos, channel_url: url, video_tab: tab}) when is_binary(url) do
+    toggle = if tab == :streams, do: "v: videos", else: "s: streams"
+
+    {"j/k | Enter: play | b: bookmark | e: queue | #{toggle} | /: filter | Q: manage | Esc: back | q: quit",
+     :white}
+  end
 
   defp footer_content(%{mode: :videos}),
-    do: {"j/k | Enter: play | b: bookmark | e: queue | Q: manage | Esc: back | q: quit", :white}
+    do:
+      {"j/k | Enter: play | b: bookmark | e: queue | /: filter | Q: manage | H: history | Esc: back | q: quit",
+       :white}
 
   defp footer_content(%{view: :bookmarks}),
     do:
-      {"j/k | a: add | d: del | Enter: play | e: queue | Q: manage | Tab: subs | q: quit", :white}
+      {"j/k | a: add | d: del | Enter: play | e: queue | /: filter | Q: queue | Tab: subs | q: quit",
+       :white}
 
   defp footer_content(%{view: :subscriptions}),
-    do: {"j/k | a: add | d: delete | Enter: open | Q: queue | Tab: search | q: quit", :white}
+    do:
+      {"j/k | a: add | d: del | Enter: open | /: filter | Q: queue | H: history | Tab: search | q: quit",
+       :white}
 
   defp footer_content(%{view: :search}),
-    do: {"/: search | Q: queue | Tab: local | q: quit", :white}
+    do: {"/: search | Q: queue | H: history | Tab: local | q: quit", :white}
 
   defp footer_content(%{view: :local}),
     do:
-      {"j/k | a: add | d: del | Enter: open | e: queue | Q: manage | Tab: bookmarks | q: quit",
+      {"j/k | a: add | d: del | Enter: open | e: queue | /: filter | Q: queue | Tab: bookmarks | q: quit",
        :white}
 
   defp clamp(n, lo, _hi) when n < lo, do: lo

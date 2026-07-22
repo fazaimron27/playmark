@@ -21,6 +21,7 @@ defmodule Playmark.DataCase do
     Playmark.Repo.delete_all(Playmark.Subscription)
     Playmark.Repo.delete_all(Playmark.Playlist)
     Playmark.Repo.delete_all(Playmark.QueueItem)
+    Playmark.Repo.delete_all(Playmark.HistoryItem)
     :ok
   end
 end

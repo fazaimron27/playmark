@@ -77,6 +77,7 @@ Bookmarks view:
   channel and saves it, `Esc` cancels
 - `d` — delete the selected bookmark (`y` confirms, any other key cancels)
 - `Enter` — play the selected video in the configured player
+- `/` — filter the list (see [Filtering](#filtering))
 - `Tab` — cycle to subscriptions
 - `q` — quit
 
@@ -86,9 +87,11 @@ never stored, so it's always current.
 
 - `a` — add a subscription: paste a channel URL (e.g.
   `https://www.youtube.com/@handle`), `Enter` resolves the channel name
-  and saves it
+  and saves it. A pasted tab suffix (`/videos`, `/streams`, `/shorts`, …) is
+  stripped, so `.../@handle/videos` and `.../@handle` are the same subscription
 - `d` — unsubscribe from the selected channel (`y` confirms, any other key cancels)
 - `Enter` — open the channel and list its latest videos
+- `/` — filter the list (see [Filtering](#filtering))
 - `Tab` — cycle to search
 
 Search view: query YouTube directly, no API key.
@@ -108,6 +111,7 @@ subscriptions. Files are listed in natural order, so `ep2` sorts before `ep10`
   it and saves it under the directory's name
 - `d` — remove the selected directory (`y` confirms, any other key cancels)
 - `Enter` — open the directory and list its media files
+- `/` — filter the list (see [Filtering](#filtering))
 - `Tab` — cycle back to bookmarks
 
 In a video list (a channel's videos, search results, or a directory's files):
@@ -116,11 +120,38 @@ In a video list (a channel's videos, search results, or a directory's files):
 - `b` — bookmark the selected video (subscriptions, search, and bookmarks stay
   separate; playing from a subscription or search does not auto-bookmark; local
   files can't be bookmarked)
+- `s` / `v` — when browsing a subscription, flip the list between the channel's
+  **Streams** and **Videos** tabs, mirroring YouTube's own channel tabs. The
+  Streams tab shows a status badge per row — `LIVE` (broadcasting now), `ENDED`
+  (a past broadcast), or `SOON` (scheduled) — and playing a live entry joins at
+  the live edge. (No effect on search results or local files.)
+- `/` — filter the list (see [Filtering](#filtering))
 - `Esc` — back to the view it was opened from
 
 The player closes back to the list when the video ends. Every fetch, channel
 listing, and playback runs in the background, so the UI never freezes; long
 operations show a status and accept `Esc` to cancel.
+
+### Filtering
+
+Any list can get long — a channel's uploads, a directory of files, a pile of
+bookmarks. Press `/` to filter it as you type:
+
+- `/` — open the filter field over the current list (bookmarks, subscriptions,
+  local playlists, or a video list). In the Search view `/` still opens the
+  query prompt — that view's list is the search results, filtered once they
+  arrive.
+- type to narrow the list live (case-insensitive substring over the visible
+  columns — title/channel, name/URL, name/path, or video title); `backspace`
+  edits
+- `Enter` or `Esc` — close the field, **keeping** the term (the list stays
+  narrowed and the title shows e.g. `Bookmarks — "news" (3/12)`)
+- `Esc` again (with the field closed) — clear the filter
+- `/` again — reopen the field prefilled with the current term to edit it
+
+`j`/`k`, `Enter`, `d`, `e`, `b` all act on the filtered selection. The filter
+clears automatically when the list changes — switching views with `Tab`, leaving
+a channel's video list, or loading a new search/channel/directory.
 
 ### Queue
 
@@ -140,7 +171,7 @@ running player (`Q` is the only key playback accepts). In the queue manager:
 
 - `j` / `k` — move the selection
 - `[` / `]` — move the selected item up / down in play order
-- `d` — remove the selected item
+- `d` — remove the selected item (`y` confirms, any other key cancels)
 - `c` — clear the whole queue (`y` confirms, any other key cancels)
 - `Enter` — start playing from the top
 - `Esc` — close the manager, back to where you opened it from
@@ -150,6 +181,25 @@ end, is dropped from the queue, and the next one starts automatically — one
 player at a time, never two at once. If an item fails to play, the queue stops,
 shows the error, and drops you back into the queue manager with the remaining
 items intact so you can remove the offender and continue.
+
+### History
+
+Every time you play something, it's recorded to a persisted watch history — the
+moment playback begins, from anywhere (a bookmark, a channel's video, a search
+result, a local file, or the queue). Like the queue, history stores its entries
+outright, so it survives restarts. Replaying a video you've already watched just
+moves it back to the top rather than adding a duplicate.
+
+Open history with `H` from any list or video list (not over a running player).
+In the history view:
+
+- `j` / `k` — move the selection
+- `Enter` — replay the selected entry
+- `d` — remove the selected entry (`y` confirms, any other key cancels)
+- `c` — clear the whole history (`y` confirms, any other key cancels)
+- `Esc` — close, back to where you opened it from
+
+History is unbounded — it keeps everything until you clear it.
 
 ### Playback quality
 

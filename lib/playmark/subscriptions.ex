@@ -24,10 +24,10 @@ defmodule Playmark.Subscriptions do
   Returns `{:ok, subscription}` or `{:error, reason}`.
   """
   def add_subscription(url) when is_binary(url) do
-    url = String.trim(url)
+    url = url |> String.trim() |> YouTube.canonical_channel_url()
 
     with {:ok, _} <- YouTube.validate(url),
-         {:ok, name} <- Channel.name(url) do
+         {:ok, name} <- channel().name(url) do
       %Subscription{}
       |> Subscription.changeset(%{url: url, name: name})
       |> Repo.insert()
@@ -40,4 +40,8 @@ defmodule Playmark.Subscriptions do
   def delete_subscription(%Subscription{} = subscription) do
     Repo.delete(subscription)
   end
+
+  # The channel name lookup shells out to yt-dlp; swappable in tests via the
+  # :channel_impl seam (default Playmark.Channel), like the TUI uses.
+  defp channel, do: Application.get_env(:playmark, :channel_impl, Channel)
 end

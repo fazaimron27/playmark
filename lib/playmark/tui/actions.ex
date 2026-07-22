@@ -13,7 +13,21 @@ defmodule Playmark.TUI.Actions do
   """
 
   alias ExRatatui.Event
-  alias Playmark.{Bookmarks, Channel, Local, Playback, Playlists, Queue, Search, Subscriptions}
+
+  alias Playmark.TUI.Filter
+
+  alias Playmark.{
+    Bookmarks,
+    Channel,
+    History,
+    Local,
+    Playback,
+    Playlists,
+    Queue,
+    Search,
+    Subscriptions,
+    YouTube
+  }
 
   # --- list mode -----------------------------------------------------------
 
@@ -26,7 +40,7 @@ defmodule Playmark.TUI.Actions do
   # Search opens its query prompt with "/" (it takes a query, not a URL); the
   # other views add with "a". Each key is a no-op in the wrong view.
   def handle_list_key("/", %{view: :search} = state), do: {:noreply, start_input(state)}
-  def handle_list_key("/", state), do: {:noreply, state}
+  def handle_list_key("/", state), do: {:noreply, open_filter(state)}
   def handle_list_key("a", %{view: :search} = state), do: {:noreply, state}
   def handle_list_key("a", state), do: {:noreply, start_input(state)}
   def handle_list_key("d", state), do: {:noreply, confirm_delete_selected(state)}
@@ -34,6 +48,10 @@ defmodule Playmark.TUI.Actions do
   # "e" appends the selected item to the playback queue. A no-op in views with no
   # selectable list here (search has none in :list mode) via enqueue_selected/1.
   def handle_list_key("e", state), do: {:noreply, enqueue_selected(state)}
+  # Esc clears an active filter (there's otherwise no Esc binding in :list); with
+  # no filter it's a no-op. See open_filter/1 and handle_filter_key/2.
+  def handle_list_key("esc", %{filter: ""} = state), do: {:noreply, state}
+  def handle_list_key("esc", state), do: {:noreply, %{state | filter: "", selected: 0}}
   def handle_list_key(_code, state), do: {:noreply, state}
 
   # Tab cycles the four top-level views. Clear any video list / channel label
@@ -48,7 +66,7 @@ defmodule Playmark.TUI.Actions do
         :local -> :bookmarks
       end
 
-    %{state | view: next, videos: [], channel_name: nil, selected: 0, status: nil}
+    %{state | view: next, videos: [], channel_name: nil, selected: 0, status: nil, filter: ""}
   end
 
   defp start_input(state) do
@@ -115,6 +133,18 @@ defmodule Playmark.TUI.Actions do
     %{clear_queue(state) | mode: :queue_manage, confirm: nil}
   end
 
+  defp perform_confirmed(:clear_history, state) do
+    %{clear_history(state) | mode: :history, confirm: nil}
+  end
+
+  defp perform_confirmed(:remove_queued, state) do
+    %{remove_queued(state) | mode: :queue_manage, confirm: nil}
+  end
+
+  defp perform_confirmed(:remove_history, state) do
+    %{remove_history(state) | mode: :history, confirm: nil}
+  end
+
   defp delete_selected(state) do
     case selected_item(state) do
       nil ->
@@ -178,9 +208,24 @@ defmodule Playmark.TUI.Actions do
   # playback queue, carrying its own local? flag so the play path is right later.
   def handle_videos_key("e", state), do: {:noreply, enqueue_selected(state)}
 
-  # Back to the list we came from. The view is unchanged — a video list is only
+  # "s"/"v" flip an open channel listing between its Streams and Videos tabs,
+  # re-fetching in place (see switch_tab/2). Only meaningful for a subscription
+  # listing (channel_url set) — a no-op for a search or local-file listing, and a
+  # no-op when already on the requested tab.
+  def handle_videos_key("s", state), do: {:noreply, switch_tab(state, :streams)}
+  def handle_videos_key("v", state), do: {:noreply, switch_tab(state, :videos)}
+
+  # "/" opens the incremental filter over the current video list (see open_filter/1).
+  def handle_videos_key("/", state), do: {:noreply, open_filter(state)}
+
+  # Esc first clears an active filter (staying in :videos); with no filter it goes
+  # back to the list we came from. The view is unchanged — a video list is only
   # ever opened from Subscriptions, Search, or Local — so keep it, clearing the
   # results.
+  def handle_videos_key("esc", %{filter: filter} = state) when filter != "" do
+    {:noreply, %{state | filter: "", selected: 0}}
+  end
+
   def handle_videos_key("esc", state) do
     {:noreply,
      %{
@@ -188,12 +233,51 @@ defmodule Playmark.TUI.Actions do
        | mode: :list,
          videos: [],
          channel_name: nil,
+         channel_url: nil,
+         video_tab: :videos,
          selected: 0,
-         status: nil
+         status: nil,
+         filter: ""
      }}
   end
 
   def handle_videos_key(_code, state), do: {:noreply, state}
+
+  # --- filter mode ---------------------------------------------------------
+
+  # Open the incremental filter field over the current browse list, remembering
+  # the base mode to restore when it closes (:list or :videos). The current
+  # `filter` term is kept, so reopening the field prefills it for editing.
+  defp open_filter(state) do
+    %{state | mode: :filter, filter_return: state.mode}
+  end
+
+  # Live filter over the current list: printable keys append to the term,
+  # backspace deletes, Enter/Esc close the field keeping the term (an empty term
+  # is no filter). After every term change the selection is reclamped into the
+  # newly-narrowed list so it can never point past the last visible row.
+  def handle_filter_key("enter", state), do: {:noreply, %{state | mode: state.filter_return}}
+  def handle_filter_key("esc", state), do: {:noreply, %{state | mode: state.filter_return}}
+
+  def handle_filter_key("backspace", state) do
+    filter = String.slice(state.filter, 0..-2//1)
+    {:noreply, reclamp_filtered(%{state | filter: filter})}
+  end
+
+  def handle_filter_key(code, state) do
+    # A printable key is a single grapheme (letters, digits, space, punctuation);
+    # named keys ("left", "f5", …) are longer and ignored.
+    if String.length(code) == 1 do
+      {:noreply, reclamp_filtered(%{state | filter: state.filter <> code})}
+    else
+      {:noreply, state}
+    end
+  end
+
+  # Keep `selected` within the filtered list after the term changes.
+  defp reclamp_filtered(state) do
+    %{state | selected: clamp(state.selected, 0, max(length(current_list(state)) - 1, 0))}
+  end
 
   # --- input mode ----------------------------------------------------------
 
@@ -229,15 +313,13 @@ defmodule Playmark.TUI.Actions do
     end
   end
 
-  # The list the selection currently points into, given view + mode. The
-  # queue-manage modal navigates its own list via `queue_selected` (see
-  # handle_queue_key/2), so it isn't represented here.
-  defp current_list(%{mode: :videos, videos: videos}), do: videos
-  defp current_list(%{view: :bookmarks, bookmarks: bookmarks}), do: bookmarks
-  defp current_list(%{view: :subscriptions, subscriptions: subscriptions}), do: subscriptions
-  defp current_list(%{view: :local, playlists: playlists}), do: playlists
-  # The search view holds no list in :list mode — results live in :videos mode.
-  defp current_list(%{view: :search}), do: []
+  # The list the selection currently points into, given view + mode, narrowed by
+  # the active filter term. Delegates to `Playmark.TUI.Filter.visible/1` — the
+  # single place the view/mode→list mapping lives, shared with the view so what's
+  # navigated and what's rendered can never diverge. The queue-manage modal
+  # navigates its own list via `queue_selected` (see handle_queue_key/2), so it
+  # isn't represented here.
+  defp current_list(state), do: Filter.visible(state)
 
   defp selected_item(state) do
     Enum.at(current_list(state), state.selected)
@@ -298,7 +380,7 @@ defmodule Playmark.TUI.Actions do
   def handle_queue_key("down", state), do: {:noreply, move_queue(state, 1)}
   def handle_queue_key("k", state), do: {:noreply, move_queue(state, -1)}
   def handle_queue_key("up", state), do: {:noreply, move_queue(state, -1)}
-  def handle_queue_key("d", state), do: {:noreply, remove_queued(state)}
+  def handle_queue_key("d", state), do: {:noreply, confirm_remove_queued(state)}
   def handle_queue_key("[", state), do: {:noreply, reorder_queued(state, :up)}
   def handle_queue_key("]", state), do: {:noreply, reorder_queued(state, :down)}
   def handle_queue_key("c", state), do: {:noreply, confirm_clear_queue(state)}
@@ -322,6 +404,26 @@ defmodule Playmark.TUI.Actions do
   end
 
   defp selected_queue_item(state), do: Enum.at(state.queue, state.queue_selected)
+
+  # A single-item remove is destructive and a single keystroke, so it's staged
+  # behind a confirmation like a list delete. The selection index is preserved
+  # through :confirm mode, so remove_queued/1 (run from handle_confirm_key/2 on "y")
+  # resolves the same item. A no-op when nothing is selected (empty queue).
+  defp confirm_remove_queued(state) do
+    case selected_queue_item(state) do
+      nil ->
+        state
+
+      item ->
+        %{
+          state
+          | mode: :confirm,
+            confirm_return: :queue_manage,
+            confirm: %{action: :remove_queued, prompt: "Remove \"#{item.title}\" from the queue?"},
+            status: nil
+        }
+    end
+  end
 
   defp remove_queued(state) do
     case selected_queue_item(state) do
@@ -399,6 +501,129 @@ defmodule Playmark.TUI.Actions do
     end
   end
 
+  # --- history -------------------------------------------------------------
+
+  # Open the watch-history modal, remembering the mode to restore on Esc. Reachable
+  # from a browsable list (:list/:videos) only — never over the running player (the
+  # `H` route in Playmark.TUI is guarded to those modes). Refreshes the list so a
+  # play recorded since mount (or a rewatch that bumped an item) shows in order.
+  def open_history(state) do
+    history = list_history()
+
+    %{
+      state
+      | mode: :history,
+        history_return: state.mode,
+        history: history,
+        history_selected: clamp(state.history_selected, 0, max(length(history) - 1, 0))
+    }
+  end
+
+  def handle_history_key("q", state), do: {:stop, state}
+  def handle_history_key("j", state), do: {:noreply, move_history(state, 1)}
+  def handle_history_key("down", state), do: {:noreply, move_history(state, 1)}
+  def handle_history_key("k", state), do: {:noreply, move_history(state, -1)}
+  def handle_history_key("up", state), do: {:noreply, move_history(state, -1)}
+  def handle_history_key("d", state), do: {:noreply, confirm_remove_history(state)}
+  def handle_history_key("c", state), do: {:noreply, confirm_clear_history(state)}
+  def handle_history_key("enter", state), do: {:noreply, replay_selected(state)}
+
+  # Esc closes the modal, restoring the mode it was opened from.
+  def handle_history_key("esc", state) do
+    {:noreply, %{state | mode: state.history_return, status: nil}}
+  end
+
+  def handle_history_key(_code, state), do: {:noreply, state}
+
+  defp move_history(state, delta) do
+    case state.history do
+      [] ->
+        state
+
+      history ->
+        %{state | history_selected: clamp(state.history_selected + delta, 0, length(history) - 1)}
+    end
+  end
+
+  defp selected_history_item(state), do: Enum.at(state.history, state.history_selected)
+
+  # A single-entry remove is staged behind a confirmation like the queue's, for the
+  # same reasons (see confirm_remove_queued/1). The selection index survives :confirm
+  # mode, so remove_history/1 resolves the same entry on "y". A no-op on empty history.
+  defp confirm_remove_history(state) do
+    case selected_history_item(state) do
+      nil ->
+        state
+
+      item ->
+        %{
+          state
+          | mode: :confirm,
+            confirm_return: :history,
+            confirm: %{action: :remove_history, prompt: "Remove \"#{item.title}\" from history?"},
+            status: nil
+        }
+    end
+  end
+
+  defp remove_history(state) do
+    case selected_history_item(state) do
+      nil ->
+        state
+
+      item ->
+        {:ok, _} = history().remove(item)
+        history = list_history()
+
+        %{
+          state
+          | history: history,
+            history_selected: clamp(state.history_selected, 0, max(length(history) - 1, 0)),
+            status: {:info, "Removed from history"}
+        }
+    end
+  end
+
+  # Clearing wipes all history in one keystroke, so it's staged behind a
+  # confirmation like the queue clear. A no-op (with a hint) on empty history so the
+  # prompt never appears for nothing. The clear itself runs from handle_confirm_key/2
+  # on "y"; Esc/other keys return to the modal.
+  defp confirm_clear_history(%{history: []} = state) do
+    %{state | status: {:info, "History is already empty"}}
+  end
+
+  defp confirm_clear_history(state) do
+    %{
+      state
+      | mode: :confirm,
+        confirm_return: :history,
+        confirm: %{
+          action: :clear_history,
+          prompt: "Clear all #{length(state.history)} history entries?"
+        },
+        status: nil
+    }
+  end
+
+  defp clear_history(state) do
+    :ok = history().clear()
+    %{state | history: [], history_selected: 0, status: {:info, "History cleared"}}
+  end
+
+  # Enter in the modal replays the selected entry. A history item carries its own
+  # `local` flag, so the play path forks correctly (local file vs YouTube URL) just
+  # as a direct Enter or a queue entry does. A no-op on an empty list.
+  defp replay_selected(state) do
+    case selected_history_item(state) do
+      nil ->
+        state
+
+      item ->
+        playable = %{title: item.title, url: item.url, local: item.local, author: item.author}
+        start_play(playable, :list, state)
+    end
+  end
+
   # --- playback (bookmarks and videos) -------------------------------------
 
   defp play_selected(state) do
@@ -447,6 +672,19 @@ defmodule Playmark.TUI.Actions do
     player = play.player()
     local? = playable.local
     url = playable.url
+
+    # Record the play the moment it begins — every play path funnels through here,
+    # so this one call captures them all. Best-effort: a failed write must never
+    # interrupt playback, so we ignore its result. A rewatch upserts (bumps the
+    # existing row's played_at) rather than duplicating (see Playmark.History).
+    _ =
+      history().record(%{
+        title: playable.title,
+        url: url,
+        local: local?,
+        author: Map.get(playable, :author)
+      })
+
     # Title + channel handed to the player as display metadata so it shows them
     # instead of "unknown title / unknown artist" (author is best-effort; nil for
     # local files or a failed oEmbed lookup — the backend then omits the flag).
@@ -526,24 +764,48 @@ defmodule Playmark.TUI.Actions do
         state
 
       subscription ->
-        parent = self()
-        chan = channel()
-        name = subscription.name
-        url = subscription.url
-
-        Task.start(fn ->
-          result =
-            try do
-              chan.list_videos(url)
-            rescue
-              error -> {:error, Exception.message(error)}
-            end
-
-          send(parent, {:videos_result, result, name})
-        end)
-
-        %{state | mode: :loading, status: {:info, "Loading videos from #{name}… (Esc to cancel)"}}
+        # Opening a subscription always starts on its Videos tab; `s` later flips
+        # to Streams via switch_tab/2. We canonicalize the stored URL here so the
+        # channel_url held in state (and reused by switch_tab) is tab-free even for
+        # a legacy subscription that still carries a `/videos` segment.
+        url = YouTube.canonical_channel_url(subscription.url)
+        fetch_videos_tab(state, url, subscription.name, :videos)
     end
+  end
+
+  # Re-fetches the currently-open channel's other tab in place. Only meaningful in
+  # :videos mode with a channel_url set (a subscription listing, not a search or
+  # local-file listing, which have no channel URL); a no-op otherwise, and a no-op
+  # when already on the requested tab. Reuses the same async path as load_videos,
+  # so a late result after Esc is dropped by the mode guard in handle_info.
+  def switch_tab(%{mode: :videos, channel_url: url, video_tab: current} = state, tab)
+      when is_binary(url) and tab in [:videos, :streams] and tab != current do
+    fetch_videos_tab(state, url, state.channel_name, tab)
+  end
+
+  def switch_tab(state, _tab), do: state
+
+  # Spawns the tab fetch and drops into :loading. `url` is the canonical (tab-free)
+  # channel URL; `Channel.list_videos/3` appends the tab. The result carries url +
+  # tab back so handle_info can set channel_url/video_tab and, on error, keep the
+  # current list on screen when we were already browsing this channel.
+  defp fetch_videos_tab(state, url, name, tab) do
+    parent = self()
+    chan = channel()
+    label = if tab == :streams, do: "streams", else: "videos"
+
+    Task.start(fn ->
+      result =
+        try do
+          chan.list_videos(url, tab)
+        rescue
+          error -> {:error, Exception.message(error)}
+        end
+
+      send(parent, {:videos_result, result, name, url, tab})
+    end)
+
+    %{state | mode: :loading, status: {:info, "Loading #{label} from #{name}… (Esc to cancel)"}}
   end
 
   # --- opening a local playlist (list its files) ---------------------------
@@ -696,4 +958,9 @@ defmodule Playmark.TUI.Actions do
   defp search, do: Application.get_env(:playmark, :search_impl, Search)
   defp playlists, do: Application.get_env(:playmark, :playlists_impl, Playlists)
   defp local, do: Application.get_env(:playmark, :local_impl, Local)
+  defp history, do: Application.get_env(:playmark, :history_impl, History)
+
+  # History list reads go through the impl seam too, so a test stub sees its own
+  # recorded plays reflected in the modal.
+  defp list_history, do: history().list_items()
 end

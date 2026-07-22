@@ -21,7 +21,7 @@ defmodule Playmark.Channel do
   title if oEmbed is unavailable for a given video.
   """
 
-  alias Playmark.{Cache, Metadata}
+  alias Playmark.{Cache, Metadata, YouTube}
 
   # ASCII Unit Separator (0x1F): a control char that won't appear in a video
   # title, so we can reliably split id from title even when the title contains
@@ -78,26 +78,42 @@ defmodule Playmark.Channel do
   @doc """
   Lists a channel's most recent videos, newest first.
 
-  Returns `{:ok, [%{id: String.t(), title: String.t(), url: String.t()}]}` or
-  `{:error, reason}`. `limit` caps how many videos are fetched, defaulting to the
-  user's `:channel_limit` (or #{@default_limit}).
+  Returns `{:ok, [%{id, title, url, live}]}` or `{:error, reason}`. `tab` selects
+  the channel page to read — `:videos` (the default, uploads) or `:streams`
+  (live/past/upcoming broadcasts) — and is appended to the canonical channel URL,
+  so a subscription's bare URL fetches either tab deterministically. The number
+  of videos fetched is capped by the user's `:channel_limit` (or #{@default_limit}).
+  Each video's `:live` is one of `:live`, `:ended`, `:upcoming`, or `:none` (see
+  `parse_videos/1`).
   """
-  def list_videos(url, limit \\ limit()) when is_binary(url) and is_integer(limit) do
+  def list_videos(url, tab \\ :videos)
+      when is_binary(url) and tab in [:videos, :streams] do
     args = [
       "--socket-timeout",
       socket_timeout(),
       "--playlist-end",
-      Integer.to_string(limit),
+      Integer.to_string(limit()),
       "--flat-playlist",
       "--print",
-      "%(id)s#{@sep}%(title)s",
-      url
+      "%(id)s#{@sep}%(title)s#{@sep}%(live_status)s",
+      tab_url(url, tab)
     ]
 
     case System.cmd("yt-dlp", args, stderr_to_stdout: true) do
       {output, 0} -> {:ok, output |> parse_videos() |> enrich_titles()}
       {output, code} -> {:error, "yt-dlp failed (exit #{code}): #{String.trim(output)}"}
     end
+  end
+
+  # Appends the tab segment to a channel URL. A subscription URL is normally
+  # stored bare (its tab stripped on add — see
+  # Playmark.YouTube.canonical_channel_url/1), but we canonicalize here too so a
+  # legacy stored URL that still carries `/videos` doesn't become `/videos/streams`.
+  defp tab_url(url, tab) do
+    url
+    |> YouTube.canonical_channel_url()
+    |> String.trim_trailing("/")
+    |> Kernel.<>("/" <> Atom.to_string(tab))
   end
 
   @doc """
@@ -190,10 +206,17 @@ defmodule Playmark.Channel do
   end
 
   @doc """
-  Parses `yt-dlp --print "%(id)s<sep>%(title)s"` output into video maps.
+  Parses `yt-dlp --print "%(id)s<sep>%(title)s<sep>%(live_status)s"` output into
+  video maps.
 
   yt-dlp may interleave warnings (e.g. version notices); we keep only lines that
-  carry the id/title separator, so warnings are dropped.
+  carry the id/title separator, so warnings are dropped. The third field is
+  yt-dlp's `live_status`, normalized to a `:live` tag on each map: `:live`
+  (currently broadcasting), `:ended` (a finished broadcast), `:upcoming`
+  (scheduled), or `:none` (a regular upload, or the field absent). A line with
+  only two fields — from an older template or a source that omits the field —
+  still parses, defaulting `:live` to `:none`, so Search and any cached call site
+  keep working.
   """
   def parse_videos(output) do
     output
@@ -201,10 +224,31 @@ defmodule Playmark.Channel do
     |> Enum.map(&String.trim/1)
     |> Enum.filter(&String.contains?(&1, @sep))
     |> Enum.map(fn line ->
-      [id, title] = String.split(line, @sep, parts: 2)
-      %{id: id, title: title, url: "https://www.youtube.com/watch?v=#{id}"}
+      {id, title, status} =
+        case String.split(line, @sep, parts: 3) do
+          [id, title, status] -> {id, title, status}
+          [id, title] -> {id, title, nil}
+        end
+
+      %{
+        id: id,
+        title: title,
+        url: "https://www.youtube.com/watch?v=#{id}",
+        live: live_status(status)
+      }
     end)
   end
+
+  # Normalizes yt-dlp's `live_status` string to the tag the view badges on.
+  # "is_live" is a running broadcast; "was_live"/"post_live" are finished ones
+  # ("post_live" is the brief window just after a stream ends, before the VOD is
+  # processed); "is_upcoming" is scheduled. Everything else — "not_live", "NA",
+  # nil — is an ordinary video with no badge.
+  defp live_status("is_live"), do: :live
+  defp live_status("was_live"), do: :ended
+  defp live_status("post_live"), do: :ended
+  defp live_status("is_upcoming"), do: :upcoming
+  defp live_status(_other), do: :none
 
   defp first_nonempty_line(output) do
     output

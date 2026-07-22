@@ -15,18 +15,31 @@ defmodule Playmark.TUI do
     * `:input`    — type into a `TextInput`. `Enter` submits, `Esc` cancels.
                     Adds a bookmark, adds a subscription, or runs a YouTube
                     search depending on the active view.
+    * `:filter`   — type an incremental filter over the current browse list
+                    (`:list` for bookmarks/subscriptions/local, or `:videos`).
+                    Opened with `/`; the list narrows as you type. `Enter`/`Esc`
+                    close the field keeping the term; in the base mode `Esc`
+                    clears an active filter. `/` in Search stays the query prompt.
     * `:fetching` — a background task is adding a bookmark/subscription.
     * `:loading`  — a background task is listing a channel's videos or running a
                     search.
     * `:videos`   — browse a subscription's latest videos or a search's results.
                     `Enter` plays, `b` bookmarks the selected video, `Esc` goes
-                    back to the view it was opened from.
+                    back to the view it was opened from. On a subscription
+                    listing, `s`/`v` flip between the channel's Streams and Videos
+                    tabs (re-fetching in place); the Streams tab badges each row's
+                    live status. `s`/`v` are no-ops for search/local listings.
     * `:playing`  — an external player owns the screen; keys are ignored until
                     it closes.
-    * `:confirm`  — a destructive action (list `d` delete, or queue `c` clear)
-                    is staged behind a `y`/`n` prompt; `y` performs it, any
-                    other key cancels. The underlying list/queue stays on screen
+    * `:confirm`  — a destructive action (list `d` delete, queue/history `d`
+                    single-item remove, or queue/history `c` clear) is staged
+                    behind a `y`/`n` prompt; `y` performs it, any other key
+                    cancels. The underlying list/queue/history stays on screen
                     with the prompt shown in the footer.
+    * `:history`  — browse watch history (an overlay opened with `H` from
+                    `:list`/`:videos`, not over the player). `Enter` replays,
+                    `d` removes one entry, `c` clears all (via `:confirm`),
+                    `Esc` closes back to where it was opened.
 
   Subscriptions store only the channel URL and name; the video list is fetched
   live (via `Playmark.Channel`) each time a subscription is opened, so it is
@@ -48,7 +61,7 @@ defmodule Playmark.TUI do
   require Logger
 
   alias ExRatatui.Event
-  alias Playmark.{Bookmarks, Playlists, Queue, Subscriptions}
+  alias Playmark.{Bookmarks, History, Playlists, Queue, Subscriptions}
   alias Playmark.TUI.{Actions, View}
 
   @impl true
@@ -68,6 +81,11 @@ defmodule Playmark.TUI do
        queue: Queue.list_items(),
        videos: [],
        channel_name: nil,
+       # The canonical URL of the channel whose videos are open (nil otherwise),
+       # and which of its tabs is showing (:videos | :streams). Kept so the `s`/`v`
+       # keys can re-fetch the other tab of the same channel (see Actions.switch_tab/2).
+       channel_url: nil,
+       video_tab: :videos,
        selected: 0,
        # The selection index inside the queue-manage modal, kept separate from
        # `selected` so opening/closing the modal doesn't disturb the base view's
@@ -76,11 +94,21 @@ defmodule Playmark.TUI do
        # The mode to restore when the queue-manage modal closes (the modal can be
        # opened from :list, :videos, or :playing).
        queue_return: :list,
+       # Watch history (newest first), and — like the queue — a modal selection
+       # index and the mode to restore when the history modal closes. The history
+       # modal is reachable from :list/:videos only (not over the running player).
+       history: History.list_items(),
+       history_selected: 0,
+       history_return: :list,
        # A pending destructive action awaiting y/n confirmation (%{action, prompt}),
        # nil outside :confirm mode; confirm_return is the mode to restore after.
        confirm: nil,
        confirm_return: :list,
        input: input,
+       # The active incremental filter term (empty = no filter) and the mode to
+       # restore when the filter field closes (:list or :videos).
+       filter: "",
+       filter_return: :list,
        status: nil,
        playing: nil
      }}
@@ -107,8 +135,22 @@ defmodule Playmark.TUI do
     Actions.handle_queue_key(key.code, state)
   end
 
-  # A destructive action (list delete, queue clear) staged behind a yes/no
-  # prompt. "y" performs it; any other key cancels (see Actions.handle_confirm_key/2).
+  # "H" opens the watch-history modal from a browsable list (:list/:videos). Unlike
+  # the queue's "Q", it is NOT accepted over the running player — the :playing
+  # catch-all below ignores it. Placed before the mode-specific routes so it wins
+  # in :list/:videos too.
+  def handle_event(%Event.Key{code: "H"}, %{mode: mode} = state)
+      when mode in [:list, :videos] do
+    {:noreply, Actions.open_history(state)}
+  end
+
+  def handle_event(%Event.Key{} = key, %{mode: :history} = state) do
+    Actions.handle_history_key(key.code, state)
+  end
+
+  # A destructive action (list delete, queue/history single-item remove, or
+  # queue/history clear) staged behind a yes/no prompt. "y" performs it; any other
+  # key cancels (see Actions.handle_confirm_key/2).
   def handle_event(%Event.Key{} = key, %{mode: :confirm} = state) do
     Actions.handle_confirm_key(key.code, state)
   end
@@ -123,6 +165,12 @@ defmodule Playmark.TUI do
 
   def handle_event(%Event.Key{} = key, %{mode: :input} = state) do
     Actions.handle_input_key(key, state)
+  end
+
+  # Incremental filter over the current browse list: printable keys append to the
+  # term, backspace deletes, Enter/Esc close the field keeping the term.
+  def handle_event(%Event.Key{} = key, %{mode: :filter} = state) do
+    Actions.handle_filter_key(key.code, state)
   end
 
   # Esc bails out of a background add/list that's taking too long. The task keeps
@@ -204,22 +252,47 @@ defmodule Playmark.TUI do
 
   # --- channel video listing ----------------------------------------------
 
-  def handle_info({:videos_result, {:ok, videos}, name}, %{mode: :loading} = state) do
+  def handle_info({:videos_result, {:ok, videos}, name, url, tab}, %{mode: :loading} = state) do
+    label = if tab == :streams, do: "streams", else: "videos"
+
     status =
       if videos == [],
-        do: {:info, "No videos found for #{name}"},
-        else: {:info, "#{length(videos)} videos from #{name}"}
+        do: {:info, "No #{label} found for #{name}"},
+        else: {:info, "#{length(videos)} #{label} from #{name}"}
 
     {:noreply,
-     %{state | mode: :videos, videos: videos, channel_name: name, selected: 0, status: status}}
+     %{
+       state
+       | mode: :videos,
+         videos: videos,
+         channel_name: name,
+         channel_url: url,
+         video_tab: tab,
+         selected: 0,
+         filter: "",
+         status: status
+     }}
   end
 
-  def handle_info({:videos_result, {:error, reason}, _name}, %{mode: :loading} = state) do
-    {:noreply, %{state | mode: :list, status: {:error, "Could not load videos: #{reason}"}}}
+  # A tab fetch failed. When switching tabs on an already-open channel
+  # (channel_url set), keep the current list on screen and just surface the
+  # error, rather than dropping back to the subscription list. Otherwise (an
+  # initial open) fall back to :list as before.
+  def handle_info(
+        {:videos_result, {:error, reason}, _name, url, tab},
+        %{mode: :loading} = state
+      ) do
+    label = if tab == :streams, do: "streams", else: "videos"
+
+    if is_binary(url) and state.videos != [] do
+      {:noreply, %{state | mode: :videos, status: {:error, "Could not load #{label}: #{reason}"}}}
+    else
+      {:noreply, %{state | mode: :list, status: {:error, "Could not load #{label}: #{reason}"}}}
+    end
   end
 
   # Late video-list result after cancel.
-  def handle_info({:videos_result, _result, _name}, state), do: {:noreply, state}
+  def handle_info({:videos_result, _result, _name, _url, _tab}, state), do: {:noreply, state}
 
   # --- local file listing --------------------------------------------------
   # A local playlist's files land in the same :videos mode as a channel listing;
@@ -232,7 +305,17 @@ defmodule Playmark.TUI do
         else: {:info, "#{length(files)} files in #{name}"}
 
     {:noreply,
-     %{state | mode: :videos, videos: files, channel_name: name, selected: 0, status: status}}
+     %{
+       state
+       | mode: :videos,
+         videos: files,
+         channel_name: name,
+         channel_url: nil,
+         video_tab: :videos,
+         selected: 0,
+         filter: "",
+         status: status
+     }}
   end
 
   def handle_info({:files_result, {:error, reason}, _name}, %{mode: :loading} = state) do
@@ -253,7 +336,17 @@ defmodule Playmark.TUI do
         else: {:info, "#{length(videos)} results for #{query}"}
 
     {:noreply,
-     %{state | mode: :videos, videos: videos, channel_name: query, selected: 0, status: status}}
+     %{
+       state
+       | mode: :videos,
+         videos: videos,
+         channel_name: query,
+         channel_url: nil,
+         video_tab: :videos,
+         selected: 0,
+         filter: "",
+         status: status
+     }}
   end
 
   def handle_info({:search_result, {:error, reason}, _query}, %{mode: :loading} = state) do
