@@ -77,6 +77,7 @@ Bookmarks view:
   channel and saves it, `Esc` cancels
 - `d` — delete the selected bookmark (`y` confirms, any other key cancels)
 - `Enter` — play the selected video in the configured player
+- `/` — filter the list (see [Filtering](#filtering))
 - `Tab` — cycle to subscriptions
 - `q` — quit
 
@@ -90,6 +91,7 @@ never stored, so it's always current.
   stripped, so `.../@handle/videos` and `.../@handle` are the same subscription
 - `d` — unsubscribe from the selected channel (`y` confirms, any other key cancels)
 - `Enter` — open the channel and list its latest videos
+- `/` — filter the list (see [Filtering](#filtering))
 - `Tab` — cycle to search
 
 Search view: query YouTube directly, no API key.
@@ -109,6 +111,7 @@ subscriptions. Files are listed in natural order, so `ep2` sorts before `ep10`
   it and saves it under the directory's name
 - `d` — remove the selected directory (`y` confirms, any other key cancels)
 - `Enter` — open the directory and list its media files
+- `/` — filter the list (see [Filtering](#filtering))
 - `Tab` — cycle back to bookmarks
 
 In a video list (a channel's videos, search results, or a directory's files):
@@ -122,11 +125,33 @@ In a video list (a channel's videos, search results, or a directory's files):
   Streams tab shows a status badge per row — `LIVE` (broadcasting now), `ENDED`
   (a past broadcast), or `SOON` (scheduled) — and playing a live entry joins at
   the live edge. (No effect on search results or local files.)
+- `/` — filter the list (see [Filtering](#filtering))
 - `Esc` — back to the view it was opened from
 
 The player closes back to the list when the video ends. Every fetch, channel
 listing, and playback runs in the background, so the UI never freezes; long
 operations show a status and accept `Esc` to cancel.
+
+### Filtering
+
+Any list can get long — a channel's uploads, a directory of files, a pile of
+bookmarks. Press `/` to filter it as you type:
+
+- `/` — open the filter field over the current list (bookmarks, subscriptions,
+  local playlists, or a video list). In the Search view `/` still opens the
+  query prompt — that view's list is the search results, filtered once they
+  arrive.
+- type to narrow the list live (case-insensitive substring over the visible
+  columns — title/channel, name/URL, name/path, or video title); `backspace`
+  edits
+- `Enter` or `Esc` — close the field, **keeping** the term (the list stays
+  narrowed and the title shows e.g. `Bookmarks — "news" (3/12)`)
+- `Esc` again (with the field closed) — clear the filter
+- `/` again — reopen the field prefilled with the current term to edit it
+
+`j`/`k`, `Enter`, `d`, `e`, `b` all act on the filtered selection. The filter
+clears automatically when the list changes — switching views with `Tab`, leaving
+a channel's video list, or loading a new search/channel/directory.
 
 ### Queue
 
