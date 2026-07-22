@@ -108,7 +108,7 @@ defmodule Playmark.TUITest do
 
   alias ExRatatui.Event
   alias ExRatatui.Runtime
-  alias Playmark.{Bookmark, Queue, TUI}
+  alias Playmark.{Bookmark, History, Queue, TUI}
 
   defp start_tui do
     {:ok, pid} = TUI.start_link(name: nil, test_mode: {80, 24})
@@ -1357,7 +1357,7 @@ defmodule Playmark.TUITest do
       assert Enum.at(state.queue, state.queue_selected).title == "B"
     end
 
-    test "d removes the selected item and reclamps the cursor" do
+    test "d removes the selected item after confirmation and reclamps the cursor" do
       Enum.each(["A", "B"], fn t ->
         {:ok, _} = Queue.enqueue(%{title: t, url: "u-#{t}", local: false})
       end)
@@ -1365,11 +1365,34 @@ defmodule Playmark.TUITest do
       pid = start_tui()
       press(pid, "Q")
       press(pid, "j")
-      press(pid, "d")
 
+      # "d" stages a confirmation rather than removing outright; the queue stays.
+      press(pid, "d")
+      staged = user_state(pid)
+      assert staged.mode == :confirm
+      assert staged.confirm_return == :queue_manage
+      assert length(staged.queue) == 2
+
+      press(pid, "y")
       state = user_state(pid)
+      assert state.mode == :queue_manage
       assert Enum.map(state.queue, & &1.title) == ["A"]
       assert state.queue_selected == 0
+    end
+
+    test "d then a non-y key cancels the removal, leaving the queue intact" do
+      Enum.each(["A", "B"], fn t ->
+        {:ok, _} = Queue.enqueue(%{title: t, url: "u-#{t}", local: false})
+      end)
+
+      pid = start_tui()
+      press(pid, "Q")
+      press(pid, "d")
+      press(pid, "n")
+
+      state = user_state(pid)
+      assert state.mode == :queue_manage
+      assert length(state.queue) == 2
     end
 
     test "c clears the queue after confirmation" do
@@ -1638,6 +1661,167 @@ defmodule Playmark.TUITest do
       |> Repo.insert()
 
     changeset
+  end
+
+  describe "history" do
+    setup do
+      Application.put_env(:playmark, :playback_impl, TestPlayback)
+      Application.put_env(:playmark, :test_playback_pid, self())
+
+      on_exit(fn ->
+        Application.delete_env(:playmark, :playback_impl)
+        Application.delete_env(:playmark, :test_playback_pid)
+      end)
+    end
+
+    test "playing a bookmark records a history entry" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/a", title: "A", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert user_state(pid).mode == :playing
+      assert_receive {TestPlayback, play_task}, 1_000
+
+      assert [entry] = History.list_items()
+      assert entry.title == "A"
+      assert entry.url == "https://youtu.be/a"
+      assert entry.author == "C"
+
+      send(play_task, :close)
+    end
+
+    test "H opens the history modal from :list and Esc restores the prior mode" do
+      pid = start_tui()
+      assert user_state(pid).mode == :list
+
+      press(pid, "H")
+      state = user_state(pid)
+      assert state.mode == :history
+      assert state.history_return == :list
+
+      press(pid, "esc")
+      assert user_state(pid).mode == :list
+    end
+
+    test "H opens the history modal from :videos" do
+      pid = start_tui()
+
+      :sys.replace_state(pid, fn s ->
+        %{s | user_state: %{s.user_state | mode: :videos, videos: [%{title: "V", url: "u"}]}}
+      end)
+
+      press(pid, "H")
+      state = user_state(pid)
+      assert state.mode == :history
+      assert state.history_return == :videos
+    end
+
+    test "H is a no-op over the running player" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/a", title: "A", channel: "C"})
+      pid = start_tui()
+      press(pid, "enter")
+      assert user_state(pid).mode == :playing
+      assert_receive {TestPlayback, play_task}, 1_000
+
+      press(pid, "H")
+      assert user_state(pid).mode == :playing
+
+      send(play_task, :close)
+    end
+
+    test "j/k navigate within the modal, clamped to the history bounds" do
+      Enum.each(["A", "B", "C"], fn t -> {:ok, _} = History.record(%{title: t, url: "u-#{t}"}) end)
+
+      pid = start_tui()
+      press(pid, "H")
+      assert user_state(pid).history_selected == 0
+
+      press(pid, "k")
+      assert user_state(pid).history_selected == 0
+
+      press(pid, "j")
+      press(pid, "j")
+      assert user_state(pid).history_selected == 2
+
+      press(pid, "j")
+      assert user_state(pid).history_selected == 2
+    end
+
+    test "d removes the selected entry after confirmation" do
+      Enum.each(["A", "B"], fn t -> {:ok, _} = History.record(%{title: t, url: "u-#{t}"}) end)
+      pid = start_tui()
+      press(pid, "H")
+
+      # "d" stages a confirmation rather than removing outright; the history stays.
+      press(pid, "d")
+      staged = user_state(pid)
+      assert staged.mode == :confirm
+      assert staged.confirm_return == :history
+      assert length(staged.history) == 2
+
+      press(pid, "y")
+      state = user_state(pid)
+      assert state.mode == :history
+      assert length(state.history) == 1
+      assert {:info, "Removed from history"} = state.status
+    end
+
+    test "d then a non-y key cancels the removal, leaving history intact" do
+      Enum.each(["A", "B"], fn t -> {:ok, _} = History.record(%{title: t, url: "u-#{t}"}) end)
+      pid = start_tui()
+      press(pid, "H")
+
+      press(pid, "d")
+      press(pid, "n")
+
+      state = user_state(pid)
+      assert state.mode == :history
+      assert length(state.history) == 2
+    end
+
+    test "c clears the history after confirmation" do
+      {:ok, _} = History.record(%{title: "A", url: "u-a"})
+      pid = start_tui()
+      press(pid, "H")
+
+      # "c" stages a confirmation rather than clearing outright; the history stays.
+      press(pid, "c")
+      staged = user_state(pid)
+      assert staged.mode == :confirm
+      assert staged.confirm_return == :history
+      assert length(staged.history) == 1
+
+      press(pid, "y")
+      state = user_state(pid)
+      assert state.mode == :history
+      assert state.history == []
+      assert History.list_items() == []
+    end
+
+    test "c then a non-y key cancels the clear, leaving the history intact" do
+      {:ok, _} = History.record(%{title: "A", url: "u-a"})
+      pid = start_tui()
+      press(pid, "H")
+
+      press(pid, "c")
+      press(pid, "n")
+      state = user_state(pid)
+      assert state.mode == :history
+      assert length(state.history) == 1
+      assert History.list_items() != []
+    end
+
+    test "Enter replays the selected entry via start_play" do
+      {:ok, _} = History.record(%{title: "Rewatch", url: "https://youtu.be/x", author: "Chan"})
+      pid = start_tui()
+      press(pid, "H")
+
+      press(pid, "enter")
+      assert user_state(pid).mode == :playing
+      assert_receive {TestPlayback, play_task}, 1_000
+
+      send(play_task, :close)
+    end
   end
 
   defp duplicate_playlist_changeset do

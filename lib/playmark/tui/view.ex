@@ -50,6 +50,9 @@ defmodule Playmark.TUI.View do
   # The queue-manage modal names itself, whatever base view it was opened over.
   defp section(%{mode: :queue_manage}), do: "Queue"
 
+  # The history modal likewise names itself, over whatever base view.
+  defp section(%{mode: :history}), do: "History"
+
   # While browsing a channel's videos — or playing one launched from that list —
   # show the channel name, matching the video-list body (see showing_videos?/1).
   defp section(%{channel_name: name} = state) when name != nil do
@@ -77,8 +80,14 @@ defmodule Playmark.TUI.View do
       state.mode == :confirm and confirm_over_queue?(state) ->
         queue_body(state)
 
+      state.mode == :confirm and confirm_over_history?(state) ->
+        history_body(state)
+
       state.mode == :queue_manage ->
         queue_body(state)
+
+      state.mode == :history ->
+        history_body(state)
 
       state.mode == :playing ->
         now_playing(state)
@@ -155,12 +164,46 @@ defmodule Playmark.TUI.View do
   defp queue_source(%{local: true}), do: "local"
   defp queue_source(_item), do: "YouTube"
 
+  # The history modal's body: recent plays newest-first, with a "When" column
+  # (a relative age of played_at) so the recency the list is ordered by is visible.
+  defp history_body(state) do
+    table_or_empty(
+      Enum.map(state.history, &[&1.title, history_when(&1)]),
+      ["Title", "When"],
+      [{:percentage, 80}, {:percentage, 20}],
+      state.history_selected,
+      " History ",
+      "No history yet.\n\nPlay something to see it here."
+    )
+  end
+
+  # A compact relative age for a history item's played_at (e.g. "just now",
+  # "5m ago", "3h ago", "2d ago"). Uses whole units; falls back to a blank for a
+  # missing/odd timestamp so the column never crashes the renderer.
+  defp history_when(%{played_at: %DateTime{} = played_at}) do
+    secs = DateTime.diff(DateTime.utc_now(), played_at, :second)
+
+    cond do
+      secs < 60 -> "just now"
+      secs < 3600 -> "#{div(secs, 60)}m ago"
+      secs < 86_400 -> "#{div(secs, 3600)}h ago"
+      true -> "#{div(secs, 86_400)}d ago"
+    end
+  end
+
+  defp history_when(_item), do: ""
+
   # True when a confirmation is staged over the queue modal (clearing the queue),
   # so the body keeps showing the queue behind the prompt rather than the base
   # view. A list-delete confirmation (confirm_return: :list) falls through to the
   # normal view branches instead.
   defp confirm_over_queue?(%{mode: :confirm, confirm_return: :queue_manage}), do: true
   defp confirm_over_queue?(_state), do: false
+
+  # True when a confirmation is staged over the history modal (clearing history), so
+  # the body keeps showing the history behind the prompt rather than the base view.
+  defp confirm_over_history?(%{mode: :confirm, confirm_return: :history}), do: true
+  defp confirm_over_history?(_state), do: false
 
   # True while browsing a channel's video list, and while a video launched from
   # that list is playing — so both the body and header keep showing the video
@@ -389,30 +432,38 @@ defmodule Playmark.TUI.View do
   defp footer_content(%{mode: :queue_manage}),
     do: {"j/k | [/]: move | d: remove | c: clear | Enter: play | Esc: back", :white}
 
+  defp footer_content(%{mode: :history}),
+    do: {"j/k | d: remove | c: clear | Enter: play | Esc: back", :white}
+
   defp footer_content(%{mode: :playing}),
     do: {"The player controls playback — close it to return | Q: queue", :cyan}
 
   # Local files can't be bookmarked (no YouTube URL to look up), so its video
   # footer drops the bookmark hint.
   defp footer_content(%{mode: :videos, view: :local}),
-    do: {"j/k | Enter: play | e: queue | Q: manage | Esc: back | q: quit", :white}
+    do: {"j/k | Enter: play | e: queue | Q: manage | H: history | Esc: back | q: quit", :white}
 
   defp footer_content(%{mode: :videos}),
-    do: {"j/k | Enter: play | b: bookmark | e: queue | Q: manage | Esc: back | q: quit", :white}
+    do:
+      {"j/k | Enter: play | b: bookmark | e: queue | Q: manage | H: history | Esc: back | q: quit",
+       :white}
 
   defp footer_content(%{view: :bookmarks}),
     do:
-      {"j/k | a: add | d: del | Enter: play | e: queue | Q: manage | Tab: subs | q: quit", :white}
+      {"j/k | a: add | d: del | Enter: play | e: queue | Q: queue | H: history | Tab: subs | q: quit",
+       :white}
 
   defp footer_content(%{view: :subscriptions}),
-    do: {"j/k | a: add | d: delete | Enter: open | Q: queue | Tab: search | q: quit", :white}
+    do:
+      {"j/k | a: add | d: del | Enter: open | Q: queue | H: history | Tab: search | q: quit",
+       :white}
 
   defp footer_content(%{view: :search}),
-    do: {"/: search | Q: queue | Tab: local | q: quit", :white}
+    do: {"/: search | Q: queue | H: history | Tab: local | q: quit", :white}
 
   defp footer_content(%{view: :local}),
     do:
-      {"j/k | a: add | d: del | Enter: open | e: queue | Q: manage | Tab: bookmarks | q: quit",
+      {"j/k | a: add | d: del | Enter: open | e: queue | Q: queue | H: history | Tab: bookmarks | q: quit",
        :white}
 
   defp clamp(n, lo, _hi) when n < lo, do: lo

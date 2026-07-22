@@ -23,10 +23,15 @@ defmodule Playmark.TUI do
                     back to the view it was opened from.
     * `:playing`  — an external player owns the screen; keys are ignored until
                     it closes.
-    * `:confirm`  — a destructive action (list `d` delete, or queue `c` clear)
-                    is staged behind a `y`/`n` prompt; `y` performs it, any
-                    other key cancels. The underlying list/queue stays on screen
+    * `:confirm`  — a destructive action (list `d` delete, queue/history `d`
+                    single-item remove, or queue/history `c` clear) is staged
+                    behind a `y`/`n` prompt; `y` performs it, any other key
+                    cancels. The underlying list/queue/history stays on screen
                     with the prompt shown in the footer.
+    * `:history`  — browse watch history (an overlay opened with `H` from
+                    `:list`/`:videos`, not over the player). `Enter` replays,
+                    `d` removes one entry, `c` clears all (via `:confirm`),
+                    `Esc` closes back to where it was opened.
 
   Subscriptions store only the channel URL and name; the video list is fetched
   live (via `Playmark.Channel`) each time a subscription is opened, so it is
@@ -48,7 +53,7 @@ defmodule Playmark.TUI do
   require Logger
 
   alias ExRatatui.Event
-  alias Playmark.{Bookmarks, Playlists, Queue, Subscriptions}
+  alias Playmark.{Bookmarks, History, Playlists, Queue, Subscriptions}
   alias Playmark.TUI.{Actions, View}
 
   @impl true
@@ -76,6 +81,12 @@ defmodule Playmark.TUI do
        # The mode to restore when the queue-manage modal closes (the modal can be
        # opened from :list, :videos, or :playing).
        queue_return: :list,
+       # Watch history (newest first), and — like the queue — a modal selection
+       # index and the mode to restore when the history modal closes. The history
+       # modal is reachable from :list/:videos only (not over the running player).
+       history: History.list_items(),
+       history_selected: 0,
+       history_return: :list,
        # A pending destructive action awaiting y/n confirmation (%{action, prompt}),
        # nil outside :confirm mode; confirm_return is the mode to restore after.
        confirm: nil,
@@ -107,8 +118,22 @@ defmodule Playmark.TUI do
     Actions.handle_queue_key(key.code, state)
   end
 
-  # A destructive action (list delete, queue clear) staged behind a yes/no
-  # prompt. "y" performs it; any other key cancels (see Actions.handle_confirm_key/2).
+  # "H" opens the watch-history modal from a browsable list (:list/:videos). Unlike
+  # the queue's "Q", it is NOT accepted over the running player — the :playing
+  # catch-all below ignores it. Placed before the mode-specific routes so it wins
+  # in :list/:videos too.
+  def handle_event(%Event.Key{code: "H"}, %{mode: mode} = state)
+      when mode in [:list, :videos] do
+    {:noreply, Actions.open_history(state)}
+  end
+
+  def handle_event(%Event.Key{} = key, %{mode: :history} = state) do
+    Actions.handle_history_key(key.code, state)
+  end
+
+  # A destructive action (list delete, queue/history single-item remove, or
+  # queue/history clear) staged behind a yes/no prompt. "y" performs it; any other
+  # key cancels (see Actions.handle_confirm_key/2).
   def handle_event(%Event.Key{} = key, %{mode: :confirm} = state) do
     Actions.handle_confirm_key(key.code, state)
   end
