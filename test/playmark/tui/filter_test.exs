@@ -2,7 +2,7 @@ defmodule Playmark.TUI.FilterTest do
   use ExUnit.Case, async: true
 
   alias Playmark.TUI.Filter
-  alias Playmark.{Bookmark, Subscription, Playlist}
+  alias Playmark.{Bookmark, Local, Playlist, Subscription}
 
   describe "matches?/3" do
     test "empty term matches everything" do
@@ -58,6 +58,16 @@ defmodule Playmark.TUI.FilterTest do
       assert Filter.fields(state) == [:title]
     end
 
+    test "local folders and files share title filtering in videos mode" do
+      entries = [
+        %{kind: :directory, title: "Season 1", path: "/v/Season 1"},
+        %{kind: :file, title: "movie.mp4", url: "/v/movie.mp4"}
+      ]
+
+      state = %{mode: :videos, view: :locals, videos: entries, filter: "season"}
+      assert Filter.visible(state) == [hd(entries)]
+    end
+
     test "bookmarks view uses bookmarks, matched on title + channel" do
       bookmarks = [%Bookmark{title: "b"}]
       state = %{mode: :list, view: :bookmarks, bookmarks: bookmarks}
@@ -72,17 +82,18 @@ defmodule Playmark.TUI.FilterTest do
       assert Filter.fields(state) == [:name, :url]
     end
 
-    test "local view uses playlists, matched on name + path" do
-      playlists = [%Playlist{name: "p", path: "/p"}]
-      state = %{mode: :list, view: :local, playlists: playlists}
+    test "playlists view uses playlists, matched on title + channel" do
+      playlists = [%Playlist{title: "Course", channel: "Teacher"}]
+      state = %{mode: :list, view: :playlists, playlists: playlists}
       assert Filter.base_list(state) == playlists
-      assert Filter.fields(state) == [:name, :path]
+      assert Filter.fields(state) == [:title, :channel]
     end
 
-    test "search view has no list in :list mode" do
-      state = %{mode: :list, view: :search}
-      assert Filter.base_list(state) == []
-      assert Filter.fields(state) == []
+    test "locals view uses locals, matched on name + path" do
+      locals = [%Local{name: "p", path: "/p"}]
+      state = %{mode: :list, view: :locals, locals: locals}
+      assert Filter.base_list(state) == locals
+      assert Filter.fields(state) == [:name, :path]
     end
 
     test "while the filter field is open, resolves through filter_return" do
@@ -96,13 +107,13 @@ defmodule Playmark.TUI.FilterTest do
   describe "visible/1" do
     test "narrows the base list by the active term" do
       videos = [%{title: "News Today"}, %{title: "Music Mix"}]
-      state = %{mode: :videos, view: :search, videos: videos, filter: "news"}
+      state = %{mode: :videos, view: :subscriptions, videos: videos, filter: "news"}
       assert Filter.visible(state) == [%{title: "News Today"}]
     end
 
     test "an empty term returns the whole base list" do
       videos = [%{title: "a"}, %{title: "b"}]
-      state = %{mode: :videos, view: :search, videos: videos, filter: ""}
+      state = %{mode: :videos, view: :subscriptions, videos: videos, filter: ""}
       assert Filter.visible(state) == videos
     end
 
@@ -110,6 +121,29 @@ defmodule Playmark.TUI.FilterTest do
       bookmarks = [%Bookmark{title: "a"}]
       state = %{mode: :list, view: :bookmarks, bookmarks: bookmarks}
       assert Filter.visible(state) == bookmarks
+    end
+  end
+
+  describe "visible_search/1" do
+    test "filters isolated Search rows without using the base view" do
+      state = %{
+        view: :locals,
+        search_videos: [%{title: "News Today"}, %{title: "Music Mix"}],
+        search_filter: "news"
+      }
+
+      assert Filter.visible_search(state) == [%{title: "News Today"}]
+    end
+  end
+
+  describe "visible_channel_playlists/1" do
+    test "filters channel playlist containers independently" do
+      state = %{
+        channel_playlists: [%{title: "Elixir Course"}, %{title: "Music Mix"}],
+        channel_playlist_filter: "elixir"
+      }
+
+      assert Filter.visible_channel_playlists(state) == [%{title: "Elixir Course"}]
     end
   end
 end
