@@ -12,7 +12,7 @@ defmodule Playmark.SearchTest do
                "30",
                "--flat-playlist",
                "--print",
-               "%(id)s\x1F%(title)s\x1F%(live_status)s",
+               "%(id)s\x1F%(title)s\x1F%(live_status)s\x1F%(duration)s\x1F%(view_count)s",
                "ytsearch20:today's news"
              ]
 

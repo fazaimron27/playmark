@@ -54,6 +54,9 @@ defmodule Playmark.YouTubeTest do
 
       assert YouTube.canonical_channel_url("https://www.youtube.com/@AmmarTV/shorts") ==
                "https://www.youtube.com/@AmmarTV"
+
+      assert YouTube.canonical_channel_url("https://www.youtube.com/@AmmarTV/playlists") ==
+               "https://www.youtube.com/@AmmarTV"
     end
 
     test "strips a trailing tab from a /channel/UC… URL too" do
@@ -86,6 +89,34 @@ defmodule Playmark.YouTubeTest do
     test "returns non-string input as-is" do
       assert YouTube.canonical_channel_url(nil) == nil
       assert YouTube.canonical_channel_url(123) == 123
+    end
+  end
+
+  describe "canonical_playlist_url/1" do
+    test "normalizes direct and watch playlist links" do
+      canonical = "https://www.youtube.com/playlist?list=PL123"
+
+      assert {:ok, ^canonical} =
+               YouTube.canonical_playlist_url(
+                 "https://music.youtube.com/playlist?list=PL123&feature=share"
+               )
+
+      assert {:ok, ^canonical} =
+               YouTube.canonical_playlist_url(
+                 "https://www.youtube.com/watch?v=abcdefghijk&list=PL123"
+               )
+    end
+
+    test "rejects YouTube URLs without a playlist id" do
+      assert {:error, _} =
+               YouTube.canonical_playlist_url("https://www.youtube.com/watch?v=abcdefghijk")
+
+      assert {:error, _} = YouTube.canonical_playlist_url("https://www.youtube.com/playlist")
+    end
+
+    test "rejects non-YouTube and non-string input" do
+      assert {:error, _} = YouTube.canonical_playlist_url("https://example.com/?list=PL123")
+      assert {:error, _} = YouTube.canonical_playlist_url(nil)
     end
   end
 end

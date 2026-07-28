@@ -1,7 +1,7 @@
 defmodule Playmark.Channel do
   @moduledoc """
-  Reads a YouTube channel's video index with `yt-dlp`, without downloading
-  anything and without an API key.
+  Reads a YouTube channel's videos, streams, and playlists with `yt-dlp`, without
+  downloading anything and without an API key.
 
   `--flat-playlist` makes yt-dlp read the channel's listing page only — it emits
   one line per video (id and title) rather than resolving each video, so it
@@ -78,7 +78,7 @@ defmodule Playmark.Channel do
   @doc """
   Lists a channel's most recent videos, newest first.
 
-  Returns `{:ok, [%{id, title, url, live}]}` or `{:error, reason}`. `tab` selects
+  Returns `{:ok, [%{id, title, url, live, duration, views}]}` or `{:error, reason}`. `tab` selects
   the channel page to read — `:videos` (the default, uploads) or `:streams`
   (live/past/upcoming broadcasts) — and is appended to the canonical channel URL,
   so a subscription's bare URL fetches either tab deterministically. The number
@@ -95,7 +95,7 @@ defmodule Playmark.Channel do
       Integer.to_string(limit()),
       "--flat-playlist",
       "--print",
-      "%(id)s#{@sep}%(title)s#{@sep}%(live_status)s",
+      "%(id)s#{@sep}%(title)s#{@sep}%(live_status)s#{@sep}%(duration)s#{@sep}%(view_count)s",
       tab_url(url, tab)
     ]
 
@@ -105,15 +105,69 @@ defmodule Playmark.Channel do
     end
   end
 
+  @doc """
+  Lists the playlist containers published on a channel's Playlists tab.
+
+  Returns `{:ok, [%{id, title, url}]}` or `{:error, reason}`. These rows are not
+  playable; callers open one through `Playmark.YouTubePlaylist.list_videos/1`.
+  """
+  def list_playlists(url, limit \\ limit())
+      when is_binary(url) and is_integer(limit) and limit > 0 do
+    case System.cmd("yt-dlp", playlist_args(url, limit), stderr_to_stdout: true) do
+      {output, 0} -> {:ok, parse_playlists(output)}
+      {output, code} -> {:error, "yt-dlp failed (exit #{code}): #{String.trim(output)}"}
+    end
+  end
+
+  @doc "Builds the bounded flat-playlist arguments for a channel's Playlists tab."
+  def playlist_args(url, limit) when is_binary(url) and is_integer(limit) and limit > 0 do
+    [
+      "--socket-timeout",
+      socket_timeout(),
+      "--playlist-end",
+      Integer.to_string(limit),
+      "--flat-playlist",
+      "--print",
+      "%(extractor_key)s#{@sep}%(id)s#{@sep}%(title)s#{@sep}%(url)s",
+      tab_url(url, :playlists)
+    ]
+  end
+
+  @doc "Parses channel Playlists-tab output into canonical playlist containers."
+  def parse_playlists(output) when is_binary(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.map(&parse_playlist/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp parse_playlist(line) do
+    case String.split(String.trim(line), @sep, parts: 4) do
+      ["YoutubeTab", id, title, url] when title not in ["", "NA"] ->
+        case YouTube.canonical_playlist_url(url) do
+          {:ok, canonical_url} -> %{id: id, title: title, url: canonical_url}
+          {:error, _reason} -> nil
+        end
+
+      _other ->
+        nil
+    end
+  end
+
   # Appends the tab segment to a channel URL. A subscription URL is normally
   # stored bare (its tab stripped on add — see
   # Playmark.YouTube.canonical_channel_url/1), but we canonicalize here too so a
   # legacy stored URL that still carries `/videos` doesn't become `/videos/streams`.
   defp tab_url(url, tab) do
-    url
-    |> YouTube.canonical_channel_url()
-    |> String.trim_trailing("/")
-    |> Kernel.<>("/" <> Atom.to_string(tab))
+    canonical = YouTube.canonical_channel_url(url)
+    uri = URI.parse(canonical)
+    path = String.trim_trailing(uri.path || "", "/") <> "/" <> Atom.to_string(tab)
+
+    uri
+    |> Map.put(:path, path)
+    |> Map.put(:query, nil)
+    |> Map.put(:fragment, nil)
+    |> URI.to_string()
   end
 
   @doc """
@@ -206,17 +260,22 @@ defmodule Playmark.Channel do
   end
 
   @doc """
-  Parses `yt-dlp --print "%(id)s<sep>%(title)s<sep>%(live_status)s"` output into
-  video maps.
+  Parses `yt-dlp --print
+  "%(id)s<sep>%(title)s<sep>%(live_status)s<sep>%(duration)s<sep>%(view_count)s"`
+  output into video maps.
 
   yt-dlp may interleave warnings (e.g. version notices); we keep only lines that
   carry the id/title separator, so warnings are dropped. The third field is
   yt-dlp's `live_status`, normalized to a `:live` tag on each map: `:live`
   (currently broadcasting), `:ended` (a finished broadcast), `:upcoming`
-  (scheduled), or `:none` (a regular upload, or the field absent). A line with
-  only two fields — from an older template or a source that omits the field —
-  still parses, defaulting `:live` to `:none`, so Search and any cached call site
-  keep working.
+  (scheduled), or `:none` (a regular upload, or the field absent). The fourth and
+  fifth fields are the runtime in seconds (`:duration`) and the view count
+  (`:views`), each an integer or `nil` when yt-dlp emits `"NA"`/blank.
+
+  Shorter lines still parse for backward compatibility: a 3-field line (no
+  duration/views) leaves both `nil`, and a 2-field line — from an older template
+  or a source that omits `live_status` — also defaults `:live` to `:none`, so
+  Search and any cached call site keep working.
   """
   def parse_videos(output) do
     output
@@ -224,17 +283,20 @@ defmodule Playmark.Channel do
     |> Enum.map(&String.trim/1)
     |> Enum.filter(&String.contains?(&1, @sep))
     |> Enum.map(fn line ->
-      {id, title, status} =
-        case String.split(line, @sep, parts: 3) do
-          [id, title, status] -> {id, title, status}
-          [id, title] -> {id, title, nil}
+      {id, title, status, duration, views} =
+        case String.split(line, @sep, parts: 5) do
+          [id, title, status, duration, views] -> {id, title, status, duration, views}
+          [id, title, status] -> {id, title, status, nil, nil}
+          [id, title] -> {id, title, nil, nil, nil}
         end
 
       %{
         id: id,
         title: title,
         url: "https://www.youtube.com/watch?v=#{id}",
-        live: live_status(status)
+        live: live_status(status),
+        duration: parse_int(duration),
+        views: parse_int(views)
       }
     end)
   end
@@ -249,6 +311,18 @@ defmodule Playmark.Channel do
   defp live_status("post_live"), do: :ended
   defp live_status("is_upcoming"), do: :upcoming
   defp live_status(_other), do: :none
+
+  # Parses a yt-dlp integer field (duration seconds, view count) into an integer,
+  # or nil when the field is absent, blank, or "NA" — so a source that omits it
+  # renders as an empty cell rather than crashing the parser.
+  defp parse_int(value) when value in [nil, "", "NA"], do: nil
+
+  defp parse_int(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {int, _rest} -> int
+      :error -> nil
+    end
+  end
 
   defp first_nonempty_line(output) do
     output
