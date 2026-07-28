@@ -4,24 +4,20 @@ defmodule Playmark.PlaylistTest do
   alias Playmark.Playlist
 
   describe "changeset/2" do
-    test "is valid with path and name" do
+    test "accepts URL, title, and channel" do
       changeset =
         Playlist.changeset(%Playlist{}, %{
-          path: "/home/user/Videos",
-          name: "Videos"
+          url: "https://www.youtube.com/playlist?list=PL123",
+          title: "Lessons",
+          channel: "Teacher"
         })
 
       assert changeset.valid?
     end
 
-    test "requires path and name" do
-      changeset = Playlist.changeset(%Playlist{}, %{})
-
-      assert %{path: ["can't be blank"], name: ["can't be blank"]} = errors(changeset)
+    test "requires URL and title but allows a missing channel" do
+      refute Playlist.changeset(%Playlist{}, %{}).valid?
+      assert Playlist.changeset(%Playlist{}, %{url: "u", title: "t"}).valid?
     end
-  end
-
-  defp errors(changeset) do
-    Ecto.Changeset.traverse_errors(changeset, fn {msg, _opts} -> msg end)
   end
 end

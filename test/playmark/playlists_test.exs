@@ -1,71 +1,73 @@
+defmodule Playmark.PlaylistsTest.StubYouTubePlaylist do
+  def metadata(url), do: {:ok, %{title: "Resolved #{url}", channel: "Channel"}}
+end
+
 defmodule Playmark.PlaylistsTest do
   use Playmark.DataCase, async: false
 
   alias Playmark.{Playlist, Playlists}
 
   setup do
-    dir =
-      Path.join(
-        System.tmp_dir!(),
-        "playmark_playlists_test_#{System.unique_integer([:positive])}"
-      )
+    Application.put_env(
+      :playmark,
+      :youtube_playlist_impl,
+      Playmark.PlaylistsTest.StubYouTubePlaylist
+    )
 
-    File.mkdir_p!(dir)
-    on_exit(fn -> File.rm_rf!(dir) end)
-    {:ok, dir: dir}
+    on_exit(fn -> Application.delete_env(:playmark, :youtube_playlist_impl) end)
   end
 
-  describe "add_playlist/1" do
-    test "registers an existing directory, deriving the name from its basename", %{dir: dir} do
-      assert {:ok, playlist} = Playlists.add_playlist(dir)
-      assert playlist.path == dir
-      assert playlist.name == Path.basename(dir)
-    end
+  test "canonicalizes and saves playlist metadata" do
+    assert {:ok, playlist} =
+             Playlists.add_playlist("https://www.youtube.com/watch?v=abcdefghijk&list=PL123")
 
-    test "expands the path before storing it", %{dir: dir} do
-      # A relative-looking path with . segments resolves to the same absolute dir.
-      messy = Path.join(dir, ".")
-
-      assert {:ok, playlist} = Playlists.add_playlist(messy)
-      assert playlist.path == dir
-    end
-
-    test "rejects a path that is not a directory" do
-      assert {:error, reason} = Playlists.add_playlist("/nonexistent/playmark/path")
-      assert reason =~ "not a directory"
-    end
-
-    test "rejects a duplicate path", %{dir: dir} do
-      assert {:ok, _} = Playlists.add_playlist(dir)
-      assert {:error, changeset} = Playlists.add_playlist(dir)
-      refute changeset.valid?
-    end
+    assert playlist.url == "https://www.youtube.com/playlist?list=PL123"
+    assert playlist.title == "Resolved https://www.youtube.com/playlist?list=PL123"
+    assert playlist.channel == "Channel"
   end
 
-  describe "list_playlists/0" do
-    test "returns playlists newest first" do
-      older = insert_playlist("/tmp/a", "A", ~N[2026-01-01 00:00:00])
-      newer = insert_playlist("/tmp/b", "B", ~N[2026-02-01 00:00:00])
-
-      assert [first, second] = Playlists.list_playlists()
-      assert first.id == newer.id
-      assert second.id == older.id
-    end
+  test "rejects non-playlist URLs" do
+    assert {:error, _} = Playlists.add_playlist("https://www.youtube.com/watch?v=abcdefghijk")
   end
 
-  describe "delete_playlist/1" do
-    test "removes the playlist" do
-      playlist = insert_playlist("/tmp/doomed", "Doomed")
+  test "rejects equivalent duplicate URLs" do
+    assert {:ok, _} = Playlists.add_playlist("https://youtube.com/playlist?list=PL123")
 
-      assert {:ok, _} = Playlists.delete_playlist(playlist)
-      assert Playlists.list_playlists() == []
-    end
+    assert {:error, changeset} =
+             Playlists.add_playlist("https://music.youtube.com/watch?v=x&list=PL123")
+
+    refute changeset.valid?
   end
 
-  defp insert_playlist(path, name, inserted_at \\ ~N[2026-01-15 00:00:00]) do
+  test "saves an already-resolved playlist without another metadata lookup" do
+    assert {:ok, playlist} =
+             Playlists.save_playlist(
+               %{
+                 url: "https://www.youtube.com/watch?v=abcdefghijk&list=PL123",
+                 title: "Course"
+               },
+               "Teacher"
+             )
+
+    assert playlist.url == "https://www.youtube.com/playlist?list=PL123"
+    assert playlist.title == "Course"
+    assert playlist.channel == "Teacher"
+  end
+
+  test "lists newest first and deletes records" do
+    older = insert_playlist("PL1", "Older", ~N[2026-01-01 00:00:00])
+    newer = insert_playlist("PL2", "Newer", ~N[2026-02-01 00:00:00])
+    assert Enum.map(Playlists.list_playlists(), & &1.id) == [newer.id, older.id]
+
+    assert {:ok, _} = Playlists.delete_playlist(newer)
+    assert Enum.map(Playlists.list_playlists(), & &1.id) == [older.id]
+  end
+
+  defp insert_playlist(id, title, inserted_at) do
     Repo.insert!(%Playlist{
-      path: path,
-      name: name,
+      url: "https://www.youtube.com/playlist?list=#{id}",
+      title: title,
+      channel: "Channel",
       inserted_at: inserted_at,
       updated_at: inserted_at
     })

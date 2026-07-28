@@ -3,12 +3,13 @@ defmodule Playmark.Repo.Migrations.CreatePlaylists do
 
   def change do
     create table(:playlists) do
-      add :path, :string, null: false
-      add :name, :string, null: false
+      add :url, :string, null: false
+      add :title, :string, null: false
+      add :channel, :string
 
       timestamps()
     end
 
-    create unique_index(:playlists, [:path])
+    create unique_index(:playlists, [:url])
   end
 end
