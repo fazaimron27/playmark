@@ -18,7 +18,7 @@ defmodule Playmark.Player.Mpv do
 
   @behaviour Playmark.Player
 
-  alias Playmark.Player.Captions
+  alias Playmark.Player.{Captions, Control}
   alias Playmark.Playback
 
   @impl true
@@ -33,7 +33,13 @@ defmodule Playmark.Player.Mpv do
 
     try do
       Playback.report(opts, :playing)
-      Playback.run(executable(), play_args(url, sub_file, opts))
+
+      Control.run(
+        :mpv,
+        executable(),
+        fn socket -> play_args(url, sub_file, Map.put(opts, :control_socket, socket)) end,
+        opts
+      )
     after
       Captions.cleanup(sub_file)
     end
@@ -45,7 +51,13 @@ defmodule Playmark.Player.Mpv do
   @impl true
   def play_local(path, opts) when is_binary(path) do
     Playback.report(opts, :playing)
-    Playback.run(executable(), ["--fs"] ++ title_args(opts) ++ [path])
+
+    Control.run(
+      :mpv,
+      executable(),
+      fn socket -> local_args(path, Map.put(opts, :control_socket, socket)) end,
+      opts
+    )
   end
 
   @doc """
@@ -55,9 +67,34 @@ defmodule Playmark.Player.Mpv do
   """
   def play_args(url, sub_file, opts) do
     ["--fs", "--ytdl-format=#{opts.format}", "--ytdl-raw-options=#{ytdl_raw_options(opts)}"] ++
+      control_args(opts) ++
+      resume_args(opts) ++
       title_args(opts) ++
       subtitle_args(sub_file) ++
       [url]
+  end
+
+  @doc "The mpv argument list for a local media path."
+  def local_args(path, opts) do
+    ["--fs"] ++ control_args(opts) ++ resume_args(opts) ++ title_args(opts) ++ [path]
+  end
+
+  defp control_args(%{control_socket: socket}) when is_binary(socket),
+    do: ["--input-ipc-server=#{socket}"]
+
+  defp control_args(_opts), do: []
+
+  defp resume_args(%{start_position_ms: position}) when is_integer(position) and position > 0,
+    do: ["--start=#{seconds(position)}"]
+
+  defp resume_args(_opts), do: []
+
+  defp seconds(milliseconds) do
+    if rem(milliseconds, 1_000) == 0 do
+      to_string(div(milliseconds, 1_000))
+    else
+      :erlang.float_to_binary(milliseconds / 1_000, decimals: 3)
+    end
   end
 
   # A pre-resolved stream carries no title metadata, so mpv shows "unknown title"

@@ -26,6 +26,23 @@ defmodule Playmark.PlaybackTest do
     test "maps players to their executables" do
       assert Playback.executable(:mpv) == "mpv"
       assert Playback.executable(:vlc) == "vlc"
+      assert Playback.executable(:ffplay) == "ffplay"
+    end
+  end
+
+  describe "resume_supported?/0" do
+    test "supports mpv and VLC but not ffplay" do
+      original = Application.fetch_env(:playmark, :player)
+      on_exit(fn -> restore_env(original) end)
+
+      Application.put_env(:playmark, :player, :mpv)
+      assert Playback.resume_supported?()
+
+      Application.put_env(:playmark, :player, :vlc)
+      assert Playback.resume_supported?()
+
+      Application.put_env(:playmark, :player, :ffplay)
+      refute Playback.resume_supported?()
     end
   end
 

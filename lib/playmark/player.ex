@@ -4,16 +4,14 @@ defmodule Playmark.Player do
 
   `Playmark.Playback` is the public facade the rest of the app talks to; it reads
   configuration, builds an `opts` map, and dispatches to a backend module that
-  implements this behaviour (`Playmark.Player.Mpv`, `Playmark.Player.Vlc`). Keeping
-  the two players as separate modules behind one contract is what lets them
-  diverge where they must — most sharply around captions, which mpv gets inline
-  through its own `yt-dlp` pass while VLC needs a separate subtitle download
-  handed over as a sidecar file. The behaviour keeps that divergence honest: both
-  backends must expose the same entry points.
+  implements this behaviour (`Playmark.Player.Mpv`, `Playmark.Player.Vlc`, or
+  `Playmark.Player.Ffplay`). Keeping the players as separate modules behind one
+  contract lets them diverge where they must: mpv and VLC download caption
+  sidecars, while ffplay skips captions; VLC and ffplay pre-resolve streams, while
+  mpv drives `yt-dlp` itself. Every backend still exposes the same entry points.
 
-  Backends are config-free. Everything a backend needs to vary its behaviour
-  arrives in `t:opts/0`, resolved once by `Playmark.Playback`, so a backend never
-  reads application env itself and is trivial to drive from a test.
+  Playback options are resolved centrally and passed in `t:opts/0`; backend
+  argument construction remains directly testable without launching a player.
   """
 
   @typedoc """
@@ -32,17 +30,17 @@ defmodule Playmark.Player do
     * `:subtitle_client` — the `yt-dlp` YouTube player client for downloading
       captions (`default` — exposes tracks with no PO token, unlike the stream
       client). See `Playmark.Player.Captions` for why the two differ.
-    * `:progress` — a 1-arity reporter the backend calls with a stage atom
-      (`:resolving`, `:captions`, `:playing`) as playback advances, so the UI can
-      show step-by-step feedback. Defaults to a no-op, so backends may call it
-      unconditionally.
+    * `:progress` — a 1-arity reporter the backend calls with preparation stages
+      and playback checkpoint events. Defaults to a no-op, so backends may call
+      it unconditionally.
+    * `:start_position_ms` — a persisted resume offset, or `nil` to start over.
     * `:title` — the display title to hand the player (via `--force-media-title`
-      for mpv, `--meta-title` for VLC). Without it the player falls back to its
-      own placeholder ("unknown title"), since a pre-resolved stream URL carries
-      no metadata. `nil` or blank means no title flag is added.
+      for mpv, `--meta-title` for VLC, and `-window_title` for ffplay). Without it
+      the player falls back to its own placeholder, since a pre-resolved stream
+      URL carries no metadata. `nil` or blank means no title flag is added.
     * `:author` — the display artist/author (the YouTube channel) to hand the
-      player. Only VLC consumes it (`--meta-artist`); mpv has no artist-override
-      flag, so mpv ignores it. `nil` or blank means no artist flag is added.
+      player. Only VLC consumes it (`--meta-artist`); mpv and ffplay ignore it.
+      `nil` or blank means no artist flag is added.
   """
   @type opts :: %{
           format: String.t(),
@@ -51,13 +49,16 @@ defmodule Playmark.Player do
           subtitle_fallback: String.t() | nil,
           player_client: String.t(),
           subtitle_client: String.t(),
-          progress: (atom() -> any()),
+          progress: (term() -> any()),
+          start_position_ms: non_neg_integer() | nil,
           title: String.t() | nil,
           author: String.t() | nil
         }
 
-  @typedoc "`:ok` on clean playback, or a reason string on failure."
-  @type result :: :ok | {:error, String.t()}
+  @typedoc "The reason playback ended cleanly, or a reason string on failure."
+  @type result ::
+          {:ok, :completed | :stopped | :unknown}
+          | {:error, String.t()}
 
   @doc """
   Plays a YouTube `url`, blocking until the user closes the player.

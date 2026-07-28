@@ -30,7 +30,7 @@ defmodule Playmark.Player.Vlc do
 
   @behaviour Playmark.Player
 
-  alias Playmark.Player.Captions
+  alias Playmark.Player.{Captions, Control}
   alias Playmark.Playback
 
   # Bounds each yt-dlp socket read/connect so a black-holed network can't hang
@@ -122,7 +122,12 @@ defmodule Playmark.Player.Vlc do
   # --- launch --------------------------------------------------------------
 
   defp launch(urls, sub_file, opts) do
-    Playback.run(executable(), launch_args(urls, sub_file, opts))
+    Control.run(
+      :vlc,
+      executable(),
+      fn port -> launch_args(urls, sub_file, Map.put(opts, :control_port, port)) end,
+      opts
+    )
   end
 
   @doc """
@@ -131,14 +136,38 @@ defmodule Playmark.Player.Vlc do
   constructed flags can be asserted without launching VLC.
   """
   def launch_args(urls, sub_file, opts) do
-    vlc_args(urls) ++ sub_args(sub_file) ++ meta_args(opts)
+    vlc_args(urls, opts) ++ sub_args(sub_file) ++ meta_args(opts)
   end
 
   # Single muxed stream, or a split rendition with audio attached as a slave.
-  defp vlc_args([video]), do: base_args() ++ [video]
-  defp vlc_args([video, audio | _]), do: base_args() ++ [video, "--input-slave=#{audio}"]
+  defp vlc_args([video], opts), do: base_args(opts) ++ [video]
 
-  defp base_args, do: ["-f", "--no-video-title-show", "--play-and-exit"]
+  defp vlc_args([video, audio | _], opts),
+    do: base_args(opts) ++ [video, "--input-slave=#{audio}"]
+
+  defp base_args(opts) do
+    ["-f", "--no-video-title-show", "--play-and-exit"] ++
+      control_args(opts) ++ resume_args(opts)
+  end
+
+  defp control_args(%{control_port: port}) when is_integer(port) and port > 0 do
+    ["--no-one-instance", "--extraintf=rc", "--rc-host=127.0.0.1:#{port}"]
+  end
+
+  defp control_args(_opts), do: []
+
+  defp resume_args(%{start_position_ms: position}) when is_integer(position) and position > 0,
+    do: ["--start-time=#{seconds(position)}"]
+
+  defp resume_args(_opts), do: []
+
+  defp seconds(milliseconds) do
+    if rem(milliseconds, 1_000) == 0 do
+      to_string(div(milliseconds, 1_000))
+    else
+      :erlang.float_to_binary(milliseconds / 1_000, decimals: 3)
+    end
+  end
 
   defp sub_args(nil), do: []
   defp sub_args(sub_file), do: ["--sub-file=#{sub_file}"]

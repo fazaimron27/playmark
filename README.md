@@ -1,17 +1,17 @@
 # playmark
 
 A terminal UI for playing video without leaving your terminal — bookmark
-YouTube videos, subscribe to channels, search YouTube, and browse local
-directories, then play any of it in your media player. YouTube metadata is
+YouTube videos, subscribe to channels, save playlists, search or explore YouTube,
+and browse local directories, then play any of it in your media player. Metadata is
 fetched without any API key (via the public oEmbed endpoint), streams are
-resolved with `yt-dlp`, and playback hands off to `mpv` or `vlc`.
+resolved with `yt-dlp`, and playback hands off to `vlc`, `mpv`, or `ffplay`.
 
 ## Requirements
 
 - Elixir 1.18+ / Erlang OTP 26+
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on your `PATH`
-- A media player on your `PATH`: [`mpv`](https://mpv.io) (default) or
-  [`vlc`](https://www.videolan.org/vlc/)
+- A media player on your `PATH`: [`vlc`](https://www.videolan.org/vlc/) (default),
+  [`mpv`](https://mpv.io), or [`ffplay`](https://ffmpeg.org/ffplay.html)
 
 playmark checks for `yt-dlp` and the configured player on startup and exits with
 a helpful message if either is missing.
@@ -37,13 +37,15 @@ setting uses its default.
 
 ```sh
 # ~/.config/playmark/config.env
-player = mpv              # mpv (default) or vlc
+player = vlc              # vlc (default), mpv, or ffplay
 max_height = 1080         # cap playback resolution (video height in pixels)
 subtitles = true          # show captions (default true)
 subtitle_default = en     # first-choice caption language (default en)
 subtitle_fallback = id    # second-choice language (optional, no default)
 search_limit = 20         # results per YouTube search
-channel_limit = 30        # videos fetched when opening a channel
+explore_limit = 20        # cards fetched from YouTube's homepage
+playlist_limit = 100      # videos fetched when opening a playlist
+channel_limit = 30        # rows fetched from a channel tab
 oembed_timeout_ms = 4000  # per-title metadata lookup timeout
 oembed_concurrency = 10   # parallel metadata lookups
 socket_timeout = 30       # yt-dlp per-socket timeout, seconds
@@ -55,9 +57,11 @@ default stands, so a typo won't stop the app from starting.
 
 ### Choosing a player
 
-Playback defaults to mpv; set `player = vlc` to use VLC. mpv drives `yt-dlp`
-itself and handles HLS/muxing natively. VLC can't fetch YouTube pages, so playmark
-resolves the stream URLs with `yt-dlp -g` first and hands VLC the raw stream(s).
+Playback defaults to VLC. Set `player = mpv` to let mpv drive `yt-dlp` itself and
+handle HLS/muxing natively. VLC and ffplay cannot fetch YouTube pages, so playmark
+resolves stream URLs with `yt-dlp -g` first. ffplay uses one muxed stream and does
+not support playmark's downloaded YouTube captions or playback resume tracking.
+mpv and VLC track seekable videos and local files through their control sockets.
 
 ## Usage
 
@@ -67,8 +71,16 @@ Launch the TUI:
 mix playmark
 ```
 
-The TUI has four views — **Bookmarks**, **Subscriptions**, **Search**, and
-**Local** — cycled with `Tab`.
+The TUI has four views — **Bookmarks**, **Subscriptions**, **Playlists**, and
+**Locals** — cycled with `Tab`.
+
+From any view or open video list, press `S` to open **Search**, `E` to open
+**Explore**, `Q` to manage the queue, or `H` to view watch history. Press `?`
+for a keybinding reference overlay (`Esc` or `?` closes it).
+
+Every list supports the same navigation keys: `j`/`k` (or arrow keys) move one
+row, `g`/`Home` jump to the top, `G`/`End` to the bottom, and `PageUp`/`PageDown`
+move by a fixed step.
 
 Bookmarks view:
 
@@ -81,9 +93,9 @@ Bookmarks view:
 - `Tab` — cycle to subscriptions
 - `q` — quit
 
-Subscriptions view: subscribe to a channel and browse its latest videos live —
-the video list is fetched fresh each time (via `yt-dlp --flat-playlist`) and
-never stored, so it's always current.
+Subscriptions view: subscribe to a channel and browse its Videos, Streams, and
+Playlists tabs live. Channel contents are fetched fresh with
+`yt-dlp --flat-playlist` and never stored, so they stay current.
 
 - `a` — add a subscription: paste a channel URL (e.g.
   `https://www.youtube.com/@handle`), `Enter` resolves the channel name
@@ -92,95 +104,174 @@ never stored, so it's always current.
 - `d` — unsubscribe from the selected channel (`y` confirms, any other key cancels)
 - `Enter` — open the channel and list its latest videos
 - `/` — filter the list (see [Filtering](#filtering))
-- `Tab` — cycle to search
+- `Tab` — cycle to playlists
 
-Search view: query YouTube directly, no API key.
+Inside a channel:
 
-- `/` — enter a query, `Enter` runs the search, `Esc` cancels
-- results arrive in the same video list as an opened subscription
-- `Tab` — cycle to local
+- `v` / `s` — show the channel's Videos or Streams; these rows are directly
+  playable. Videos show **Duration** and **Views** columns; Streams instead
+  include `LIVE`, `ENDED`, or `SOON` status badges
+- `p` — show the channel's playlist containers; these are not directly playable
+- `Enter` on a playlist container — fetch and show that playlist's videos
+- `p` on a playlist container — save it to Playmark's top-level Playlists view
+- `Esc` from playlist videos — return to the channel's playlist containers;
+  `Esc` again returns to Subscriptions
 
+Search overlay: query YouTube directly without leaving the current page or using
+an API key.
+
+- `S` — open Search from a view or open video list; from results, start a new query
+- `Enter` — submit the query or play the selected result
+- `b` / `e` — bookmark or queue the selected result
+- `n` — queue the selected result to play next (right after the current item)
+- `/` — filter the current results locally
+- `Q` / `H` — open Queue or History, returning to Search when closed
+- `Esc` — cancel a running search; in results, clear an active filter first, then
+  return to the underlying page
+
+Search keeps its own rows, cursor, and filter, so opening it over Locals still
+treats results as YouTube videos and closing it restores the original list and
+filter. Search and Explore are sibling overlays and do not open over each other.
 Results follow YouTube's relevance ranking (not strictly date-sorted).
 
-Local view: register a directory and play the media files inside it — the file
-list is read fresh each time (top level only) and never stored, mirroring
-subscriptions. Files are listed in natural order, so `ep2` sorts before `ep10`
-(not after, as a plain alphabetical sort would put it).
+Playlists view: save a YouTube playlist and browse its current videos. Only the
+canonical playlist URL, title, and channel are stored; entries are fetched live
+with `yt-dlp --flat-playlist` whenever the playlist is opened. Equivalent direct
+and `watch?...&list=...` links normalize to one saved playlist.
+
+- `a` — add a playlist URL, resolving and saving its title and channel
+- `d` — remove the selected saved playlist (`y` confirms)
+- `Enter` — fetch and open up to `playlist_limit` current, available videos in
+  playlist order
+- `/` — filter saved playlists by title or channel
+- `Tab` — cycle to locals
+
+Private, deleted, and malformed entries are omitted. Each shown row is a normal
+single-video URL, so playback, bookmarking, queueing, and history use the same
+controls as other YouTube result lists.
+
+Locals view: register a directory and browse its folders and media files. Each
+folder is read fresh when opened and its contents are never stored, mirroring
+subscriptions. Folders are shown before files; both are listed in natural order,
+so `ep2` sorts before `ep10` (not after, as plain alphabetical sorting would).
+Directory symlinks are omitted so browsing stays inside the registered tree.
+Registrations remain saved when a directory or removable drive is disconnected;
+opening it then reports that it is offline or unavailable, and it can be opened
+again after the same path returns.
 
 - `a` — register a directory: type a path (e.g. `~/Videos`), `Enter` verifies
   it and saves it under the directory's name
 - `d` — remove the selected directory (`y` confirms, any other key cancels)
-- `Enter` — open the directory and list its media files
+- `Enter` — open the directory and list its child folders and media files
 - `/` — filter the list (see [Filtering](#filtering))
 - `Tab` — cycle back to bookmarks
 
-In a video list (a channel's videos, search results, or a directory's files):
+In an opened source list (a channel's videos, playlist entries, or a local
+folder):
 
-- `Enter` — play the selected video or file
-- `b` — bookmark the selected video (subscriptions, search, and bookmarks stay
-  separate; playing from a subscription or search does not auto-bookmark; local
-  files can't be bookmarked)
-- `s` / `v` — when browsing a subscription, flip the list between the channel's
-  **Streams** and **Videos** tabs, mirroring YouTube's own channel tabs. The
-  Streams tab shows a status badge per row — `LIVE` (broadcasting now), `ENDED`
-  (a past broadcast), or `SOON` (scheduled) — and playing a live entry joins at
-  the live edge. (No effect on search results or local files.)
+YouTube video lists (channel Videos, playlist entries, Search, and Explore
+results) show **Duration** and **Views** columns alongside the title, read from
+the same `yt-dlp --flat-playlist` call at no extra cost; a video that doesn't
+report a field shows a blank cell. Local folders instead show Name and Type.
+
+- `Enter` — play the selected video/file, or open the selected local folder
+- `r` — reread the current local folder, preserving its filter and selected item
+- `b` — bookmark the selected YouTube video (playing from a subscription or
+  playlist does not auto-bookmark; local files cannot be bookmarked)
+- `s` / `v` / `p` — from a channel's directly playable Videos or Streams list,
+  switch to Streams, Videos, or the channel's playlist-container list. Playing a
+  live entry joins at the live edge. These keys do not switch tabs inside a
+  selected playlist's videos or local files.
+- `e` / `n` — append the selected video to the queue, or queue it to play next
 - `/` — filter the list (see [Filtering](#filtering))
-- `Esc` — back to the view it was opened from
+- `Esc` — back to the parent local folder, or to the view the source was opened
+  from when already at its root. Returning to a parent restores its cursor and
+  filter exactly.
 
-The player closes back to the list when the video ends. Every fetch, channel
-listing, and playback runs in the background, so the UI never freezes; long
-operations show a status and accept `Esc` to cancel.
+The player returns to the list or overlay it was launched from when the video
+ends; queued playback advances to the next item. Network, shell, and playback
+work runs in background tasks so the UI never freezes. Fetching and loading can
+be canceled with `Esc`; during playback, close the external player to return
+(`Q` remains available to inspect the queue).
+
+### Explore
+
+Press `E` from any view or video list to fetch YouTube's recommended homepage
+and open it inside playmark. Explore is fetched fresh and is not persisted. It
+honors your normal `yt-dlp` configuration, including cookies when configured, so
+the feed can match your signed-in YouTube homepage. Without cookies, YouTube may
+return anonymous recommendations or an empty feed depending on region and site
+behavior.
+
+- `j` / `k` (or arrow keys) — move the selection
+- `Enter` — play the selected recommendation
+- `b` — bookmark it
+- `e` — append it to the queue
+- `n` — queue it to play next (right after the current item)
+- `Q` / `H` — open Queue or History, returning to Explore when closed
+- `Esc` — return to the view, video list, or channel playlist list where Explore opened
+
+The homepage can contain playlist, channel, and navigation cards. Explore skips
+those and shows only directly playable videos and Shorts, each with **Duration**
+and **Views** columns.
 
 ### Filtering
 
-Any list can get long — a channel's uploads, a directory of files, a pile of
+Any list can get long — a channel's uploads, a local folder, a pile of
 bookmarks. Press `/` to filter it as you type:
 
 - `/` — open the filter field over the current list (bookmarks, subscriptions,
-  local playlists, or a video list). In the Search view `/` still opens the
-  query prompt — that view's list is the search results, filtered once they
-  arrive.
+  saved playlists, channel playlist containers, locals, a video list, or Search results)
 - type to narrow the list live (case-insensitive substring over the visible
-  columns — title/channel, name/URL, name/path, or video title); `backspace`
-  edits
+  columns — title/channel, name/URL, name/path, or video title); the highlighted
+  block marks the current editing position, and `Left`/`Right`, `Home`/`End`,
+  `backspace`, and `delete` can correct text at that position
 - `Enter` or `Esc` — close the field, **keeping** the term (the list stays
   narrowed and the title shows e.g. `Bookmarks — "news" (3/12)`)
 - `Esc` again (with the field closed) — clear the filter
 - `/` again — reopen the field prefilled with the current term to edit it
 
-`j`/`k`, `Enter`, `d`, `e`, `b` all act on the filtered selection. The filter
-clears automatically when the list changes — switching views with `Tab`, leaving
-a channel's video list, or loading a new search/channel/directory.
+`j`/`k`, `Enter`, `d`, `e`, `b`, and contextual `p` all act on the filtered
+selection. Ordinary filters clear when switching views, leaving a video list,
+or loading a new channel, playlist, or local folder. A local folder remembers
+its filter and cursor while a child is open and when refreshed with `r`. Search
+and channel playlist containers likewise preserve their parent lists independently.
 
 ### Queue
 
 The queue is an ordered, persisted list of things to play back to back. Unlike
-subscriptions and local directories — which store only a handle and fetch their
+subscriptions, playlists, and local directories — which store a handle and fetch their
 contents live — the queue stores its items outright, ordering included, so it
 survives restarts. A single queue can mix YouTube videos and local files; each
 item remembers which it is, so playback takes the right path for each.
 
-From any list (bookmarks, a channel's videos, search results, or a directory's
-files):
+From any playable list (bookmarks, a channel's videos, playlist entries, search
+results, or a local folder):
 
-- `e` — append the selected bookmark, video, or file to the queue
+- `e` — append the selected bookmark, video, or file to the queue; local folders
+  themselves cannot be queued
+- `n` — queue the selected item to play next, right after the current head,
+  instead of at the tail (same lists as `e`)
 
-Open the queue manager with `Q` from a list, a video list, or even over a
-running player (`Q` is the only key playback accepts). In the queue manager:
+Open the queue manager with `Q` from any list, Search or Explore results, or even
+over a running player (`Q` is the only key playback accepts). In the queue
+manager:
 
 - `j` / `k` — move the selection
 - `[` / `]` — move the selected item up / down in play order
 - `d` — remove the selected item (`y` confirms, any other key cancels)
 - `c` — clear the whole queue (`y` confirms, any other key cancels)
-- `Enter` — start playing from the top
+- `Enter` — start playing from the top (unavailable when the manager is opened
+  over an active player)
 - `Esc` — close the manager, back to where you opened it from
+- `q` — quit playmark
 
-Once playback starts from the queue, it auto-advances: each item plays to the
-end, is dropped from the queue, and the next one starts automatically — one
-player at a time, never two at once. If an item fails to play, the queue stops,
-shows the error, and drops you back into the queue manager with the remaining
-items intact so you can remove the offender and continue.
+Once playback starts from the queue, it auto-advances: each completed item is
+dropped and the next one starts automatically — one player at a time, never two
+at once. Closing mpv or VLC before the end saves progress, keeps that item, and
+stops in the queue manager. If an item fails to play, the queue likewise stops
+and keeps the remaining items intact. ffplay cannot distinguish a manual close
+from EOF, so its clean exits retain the older remove-and-advance behavior.
 
 ### History
 
@@ -190,29 +281,38 @@ result, a local file, or the queue). Like the queue, history stores its entries
 outright, so it survives restarts. Replaying a video you've already watched just
 moves it back to the top rather than adding a duplicate.
 
-Open history with `H` from any list or video list (not over a running player).
-In the history view:
+For mpv and VLC, playmark also checkpoints the position of finite, seekable media
+after the first 10 seconds. Playing the same YouTube video or local path again
+prompts to resume, start over, or cancel. Checkpoints are cleared at EOF or near
+the final 30 seconds, and are updated periodically so they survive an application
+or player interruption. Live/non-seekable media and ffplay are not checkpointed.
+
+Open history with `H` from any list, including Search and Explore results (not
+over a running player). In the History overlay:
 
 - `j` / `k` — move the selection
 - `Enter` — replay the selected entry
+- `e` — append the selected entry to the queue
+- `n` — queue the selected entry to play next (right after the current item)
 - `d` — remove the selected entry (`y` confirms, any other key cancels)
 - `c` — clear the whole history (`y` confirms, any other key cancels)
 - `Esc` — close, back to where you opened it from
+- `q` — quit playmark
 
 History is unbounded — it keeps everything until you clear it.
 
 ### Playback quality
 
-Both players request `bestvideo[height<=1080]+bestaudio/best`. With mpv, the
-format string is passed via `--ytdl-format` and mpv muxes the video and audio
-streams itself. With VLC, YouTube's separate video-only and audio-only streams
-come back as two URLs: the video plays with the audio attached as an
-`--input-slave`; a single pre-muxed stream (the `/best` fallback) is played
-directly.
+mpv and VLC request `bestvideo[height<=1080]+bestaudio/best`. mpv receives the
+format through `--ytdl-format` and muxes the streams itself. For VLC, playmark
+resolves separate video and audio URLs and attaches audio with `--input-slave`;
+the `/best` fallback remains a single muxed stream. ffplay cannot combine split
+streams, so it requests one `best[height<=1080]` muxed stream.
 
-Both players resolve streams through yt-dlp's `web_safari` player client, which
-returns an HLS URL that plays reliably (other clients can return signed URLs
-that yield `HTTP 403`).
+All players use yt-dlp's `web_safari` player client for YouTube streams, which
+returns URLs that play reliably (other clients can return signed URLs that yield
+`HTTP 403`). mpv passes the client through to its own yt-dlp integration; VLC and
+ffplay resolve it before launching the player.
 
 ### Captions
 
@@ -231,13 +331,24 @@ plays without captions.
 Captions can't ride along with the video stream, because YouTube needs a
 different yt-dlp "player client" for each. The client that returns a playable
 stream URL (`web_safari`) drops caption tracks; the client that exposes captions
-(`default`) returns stream URLs that fail with `HTTP 403`. So for both players
-playmark makes a separate `yt-dlp` call to download the caption track to a
-temporary `.vtt` file, hands it to the player via `--sub-file`, and deletes it
-when playback ends. Toggle captions in mpv with `v`.
+(`default`) returns stream URLs that fail with `HTTP 403`. For the caption-capable
+mpv and VLC backends, playmark makes a separate `yt-dlp` call to download the
+caption track to a temporary `.vtt`, passes it through `--sub-file`, and deletes
+it when playback ends. ffplay skips YouTube captions. Toggle captions in mpv with
+`v`.
 
-Local files need no download: both players auto-load a sidecar `.srt`/`.vtt`
-sitting next to the media file with a matching name.
+Local files need no download. mpv and VLC can auto-load a matching sidecar
+`.srt`/`.vtt`; playmark does not attach local captions for ffplay.
+
+### Chapters
+
+When captions are enabled on mpv or VLC, the same metadata probe that selects a
+caption track also reports the video's chapter count, which the "Now playing"
+panel shows (e.g. `12 chapters`). This is informational only — playmark does no
+chapter seeking. mpv navigates chapters natively (it drives yt-dlp and receives
+the YouTube URL directly); VLC and ffplay play a pre-resolved stream that carries
+no chapter markers. A video without chapters, or playback without a caption probe
+(ffplay, or captions off), shows no chapter line.
 
 ## Development
 
@@ -249,3 +360,76 @@ mix format       # format
 Tests use a throwaway SQLite database (`playmark_test.db`) that is created and
 migrated by `test/test_helper.exs`; the app skips its startup auto-migration in
 the test environment.
+
+### Run from anywhere with Fish
+
+Save this autoloaded function as
+`~/.config/fish/functions/playmark.fish`:
+
+```fish
+function playmark --description "Run playmark from anywhere"
+    set -l playmark_dir /path/to/playmark
+
+    if not test -d "$playmark_dir"
+        echo "Directory not found: $playmark_dir"
+        return 1
+    end
+
+    pushd "$playmark_dir" >/dev/null; or return 1
+
+    command mix playmark
+    set -l exit_status $status
+
+    popd >/dev/null
+    return $exit_status
+end
+```
+
+Change `playmark_dir` if the repository is elsewhere. Open a new Fish session or
+run `source ~/.config/fish/functions/playmark.fish`, then launch the TUI from any
+directory with `playmark`. The function returns to the original directory when
+playmark exits.
+
+### Recommended yt-dlp configuration
+
+playmark honors the normal `yt-dlp` configuration; it does not pass
+`--ignore-config`. Put `yt-dlp` options in its own config file, not in playmark's
+`config.env`. On Linux, the user config is normally `~/.config/yt-dlp/config`.
+
+Current YouTube extraction requires an external JavaScript runtime (Deno is
+recommended) and EJS challenge-solver scripts. Official `yt-dlp` executables
+already bundle the scripts, but other installations can allow `yt-dlp` to fetch
+the current EJS release from GitHub when needed:
+
+```text
+# ~/.config/yt-dlp/config
+--remote-components ejs:github
+```
+
+This helps solve YouTube's JavaScript and `n` challenges, which can otherwise
+make formats unavailable or throttle streams. It does not install the required
+JavaScript runtime. It also permits downloading executable solver code from
+GitHub, so enable it only if you trust that source and your installation does
+not already include `yt-dlp-ejs`. See yt-dlp's
+[EJS setup guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+
+If YouTube requires a signed-in session or presents a bot/CAPTCHA block, you can
+also opt in to loading cookies directly from Firefox:
+
+```text
+# ~/.config/yt-dlp/config
+--cookies-from-browser firefox
+```
+
+This can make Explore match the signed-in homepage and allow account-gated
+content. It also makes every `yt-dlp` process read the Firefox cookie store and
+use that session for its requests, which can add startup latency and exposes the
+account to the risks of automated access. yt-dlp's
+[YouTube cookie guidance](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)
+warns that using an account can lead to temporary or permanent bans, so use
+cookies only when needed, preferably with a separate account/profile. If Firefox
+has multiple profiles, select one with `--cookies-from-browser firefox:PROFILE`.
+
+These settings apply to channel and playlist loading, Search, Explore, caption
+downloads, and online stream resolution (including mpv's `yt-dlp` integration).
+They do not affect local playback or bookmark metadata fetched through oEmbed.

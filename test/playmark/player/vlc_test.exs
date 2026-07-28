@@ -80,6 +80,24 @@ defmodule Playmark.Player.VlcTest do
 
       refute Enum.any?(args, &String.starts_with?(&1, "--meta-artist"))
     end
+
+    test "adds a dedicated RC socket and resume offset before the input" do
+      opts =
+        Map.merge(@opts, %{
+          control_port: 42_199,
+          start_position_ms: 90_500
+        })
+
+      args = Vlc.launch_args(["https://example.com/muxed"], nil, opts)
+
+      assert "--no-one-instance" in args
+      assert "--extraintf=rc" in args
+      assert "--rc-host=127.0.0.1:42199" in args
+      assert "--start-time=90.500" in args
+
+      assert Enum.find_index(args, &(&1 == "--start-time=90.500")) <
+               Enum.find_index(args, &(&1 == "https://example.com/muxed"))
+    end
   end
 
   describe "parse_stream_urls/1" do

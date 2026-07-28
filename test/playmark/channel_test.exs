@@ -65,9 +65,81 @@ defmodule Playmark.ChannelTest do
                Channel.parse_videos(output)
     end
 
+    test "parses duration (seconds) and view_count into integers" do
+      output = "abc123\x1FReal Title\x1Fnot_live\x1F563\x1F4000000\n"
+
+      assert [%{id: "abc123", duration: 563, views: 4_000_000}] = Channel.parse_videos(output)
+    end
+
+    test "leaves duration/views nil for NA, blank, or a shorter line" do
+      output =
+        "a\x1FNA fields\x1Fnot_live\x1FNA\x1FNA\n" <>
+          "b\x1FBlank fields\x1Fnot_live\x1F\x1F\n" <>
+          "c\x1FStatus only\x1Fnot_live\n" <>
+          "d\x1FLegacy two-field\n"
+
+      assert [
+               %{id: "a", duration: nil, views: nil},
+               %{id: "b", duration: nil, views: nil},
+               %{id: "c", duration: nil, views: nil},
+               %{id: "d", duration: nil, views: nil}
+             ] = Channel.parse_videos(output)
+    end
+
     test "returns an empty list when there are no video lines" do
       assert Channel.parse_videos("WARNING: nothing\n") == []
       assert Channel.parse_videos("") == []
+    end
+  end
+
+  describe "channel playlists" do
+    test "builds a bounded flat-playlist request for the canonical Playlists tab" do
+      args = Channel.playlist_args("https://www.youtube.com/@channel/videos", 25)
+
+      assert args == [
+               "--socket-timeout",
+               "30",
+               "--playlist-end",
+               "25",
+               "--flat-playlist",
+               "--print",
+               "%(extractor_key)s\x1F%(id)s\x1F%(title)s\x1F%(url)s",
+               "https://www.youtube.com/@channel/playlists"
+             ]
+    end
+
+    test "drops channel share query parameters before appending the tab" do
+      args = Channel.playlist_args("https://www.youtube.com/@channel/videos?si=shared", 10)
+      assert List.last(args) == "https://www.youtube.com/@channel/playlists"
+    end
+
+    test "parses playlist containers, canonicalizes URLs, and preserves order" do
+      output =
+        "YoutubeTab\x1FPL_one\x1FFirst Playlist\x1Fhttps://www.youtube.com/playlist?list=PL_one&si=x\n" <>
+          "YoutubeTab\x1FPL_two\x1FSecond Playlist\x1Fhttps://www.youtube.com/watch?v=abc&list=PL_two\n"
+
+      assert Channel.parse_playlists(output) == [
+               %{
+                 id: "PL_one",
+                 title: "First Playlist",
+                 url: "https://www.youtube.com/playlist?list=PL_one"
+               },
+               %{
+                 id: "PL_two",
+                 title: "Second Playlist",
+                 url: "https://www.youtube.com/playlist?list=PL_two"
+               }
+             ]
+    end
+
+    test "drops warnings, non-playlist rows, invalid URLs, and unavailable titles" do
+      output =
+        "WARNING: stale yt-dlp\n" <>
+          "Youtube\x1Fabcdefghijk\x1FVideo\x1Fhttps://www.youtube.com/watch?v=abcdefghijk\n" <>
+          "YoutubeTab\x1FPL_bad\x1FNA\x1Fhttps://www.youtube.com/playlist?list=PL_bad\n" <>
+          "YoutubeTab\x1FPL_bad\x1FBad URL\x1Fhttps://example.com/playlist?list=PL_bad\n"
+
+      assert Channel.parse_playlists(output) == []
     end
   end
 
@@ -129,6 +201,23 @@ defmodule Playmark.ChannelTest do
       )
 
       assert Channel.enrich_titles(videos) |> Enum.map(& &1.id) == ["1", "2", "3", "4", "5"]
+    end
+
+    test "preserves the :duration and :views fields while replacing the title" do
+      videos = [
+        %{id: "a", title: "Flat A", url: "https://youtu.be/a", duration: 563, views: 4_000_000},
+        %{id: "b", title: "Flat B", url: "https://youtu.be/b", duration: nil, views: nil}
+      ]
+
+      StubMetadata.set(%{
+        "https://youtu.be/a" => {:ok, %{title: "Original A", channel: "C"}},
+        "https://youtu.be/b" => {:ok, %{title: "Original B", channel: "C"}}
+      })
+
+      assert [
+               %{id: "a", title: "Original A", duration: 563, views: 4_000_000},
+               %{id: "b", title: "Original B", duration: nil, views: nil}
+             ] = Channel.enrich_titles(videos)
     end
 
     test "returns [] for an empty list without calling oEmbed" do

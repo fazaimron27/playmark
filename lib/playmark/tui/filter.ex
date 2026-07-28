@@ -12,8 +12,8 @@ defmodule Playmark.TUI.Filter do
   The lists are small in-memory lists of maps already in TUI state (dozens of
   rows), so this stays plain Elixir — no shelling out, no async. An empty term is
   the identity filter (the whole list). Rows may be Ecto structs (bookmarks,
-  subscriptions, playlists) or plain video maps; both answer `Map.get/2` for the
-  matched fields, so `matches?/3` treats them uniformly.
+  subscriptions, playlists, locals) or plain video maps; both answer `Map.get/2`
+  for the matched fields, so `matches?/3` treats them uniformly.
   """
 
   @doc """
@@ -44,7 +44,8 @@ defmodule Playmark.TUI.Filter do
   @doc """
   The unfiltered list the selection points into for the given state. Mirrors
   `Playmark.TUI.Actions.current_list/1`: the video list while browsing videos,
-  otherwise the active view's list. The search view holds no list in `:list` mode.
+  otherwise the active view's list. Search and channel-playlist rows are handled
+  separately because their parent browse state must remain intact.
 
   While the filter field is open the runtime mode is `:filter`, so we resolve
   through `effective_mode/1` to the base mode the field was opened over
@@ -56,8 +57,8 @@ defmodule Playmark.TUI.Filter do
   defp base_list(:videos, %{videos: videos}), do: videos
   defp base_list(_mode, %{view: :bookmarks, bookmarks: bookmarks}), do: bookmarks
   defp base_list(_mode, %{view: :subscriptions, subscriptions: subscriptions}), do: subscriptions
-  defp base_list(_mode, %{view: :local, playlists: playlists}), do: playlists
-  defp base_list(_mode, %{view: :search}), do: []
+  defp base_list(_mode, %{view: :playlists, playlists: playlists}), do: playlists
+  defp base_list(_mode, %{view: :locals, locals: locals}), do: locals
 
   @doc """
   The fields a row matches against, per view/mode. The video list matches on
@@ -68,7 +69,8 @@ defmodule Playmark.TUI.Filter do
   defp fields(:videos, _state), do: [:title]
   defp fields(_mode, %{view: :bookmarks}), do: [:title, :channel]
   defp fields(_mode, %{view: :subscriptions}), do: [:name, :url]
-  defp fields(_mode, %{view: :local}), do: [:name, :path]
+  defp fields(_mode, %{view: :playlists}), do: [:title, :channel]
+  defp fields(_mode, %{view: :locals}), do: [:name, :path]
   defp fields(_mode, _state), do: []
 
   # The mode the filter applies over: the base mode while the field is open
@@ -82,6 +84,20 @@ defmodule Playmark.TUI.Filter do
   test fixture) is treated as no filter.
   """
   def visible(state), do: narrow(base_list(state), fields(state), term(state))
+
+  @doc "Returns the independently filtered rows in the Search overlay."
+  def visible_search(state) do
+    narrow(Map.get(state, :search_videos, []), [:title], Map.get(state, :search_filter, ""))
+  end
+
+  @doc "Returns the independently filtered playlist containers for an open channel."
+  def visible_channel_playlists(state) do
+    narrow(
+      Map.get(state, :channel_playlists, []),
+      [:title],
+      Map.get(state, :channel_playlist_filter, "")
+    )
+  end
 
   defp term(state), do: Map.get(state, :filter) || ""
 end

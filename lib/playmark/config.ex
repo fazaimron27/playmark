@@ -9,8 +9,9 @@ defmodule Playmark.Config do
   (`Playmark.Application.data_dir/0`), which is where a single-user local app's
   state belongs (not the checked-out source tree).
 
-  `load/0` runs once from `Playmark.Application.start/2`, parses the file if it
-  exists, coerces each recognized key to its type, and writes it into the
+  `load/0` runs once from `Playmark.Application.start/2`, before the launch
+  dependency check. It parses the file if it exists, coerces each recognized key
+  to its type, and writes it into the
   `:playmark` application env with `Application.put_env/3`. The consuming modules
   (`Playmark.Playback`, `Playmark.Channel`, `Playmark.Search`) read those keys via
   `Application.get_env/3`, each supplying the built-in default as the fallback —
@@ -20,13 +21,15 @@ defmodule Playmark.Config do
   ## File format
 
       # ~/.config/playmark/config.env — comments and blank lines are ignored
-      player = vlc              # :mpv (default) or :vlc
+      player = vlc              # :vlc (default), :mpv, or :ffplay
       max_height = 1080         # max video height for playback
       subtitles = true          # show captions (default true)
       subtitle_default = en     # first-choice caption language (default en)
       subtitle_fallback = id    # second-choice language (optional, no default)
       search_limit = 20         # results per YouTube search
-      channel_limit = 30        # videos fetched per channel open
+      explore_limit = 20        # cards fetched from YouTube's homepage
+      playlist_limit = 100      # videos fetched per playlist open
+      channel_limit = 30        # rows fetched per channel tab
       oembed_timeout_ms = 4000  # per-title oEmbed lookup timeout
       oembed_concurrency = 10   # parallel oEmbed lookups
       socket_timeout = 30       # yt-dlp per-socket timeout, seconds
@@ -35,8 +38,8 @@ defmodule Playmark.Config do
   warning) so a typo can't crash boot. An unparseable value for a known key is
   dropped (with a warning) and the built-in default stands.
 
-  Warnings are logged during application start — before `Mix.Tasks.Playmark`
-  detaches the console log handler for the TUI session — so they're visible.
+  Warnings are logged before `Mix.Tasks.Playmark` detaches the console handler
+  for the TUI session, so they're visible.
   """
 
   require Logger
@@ -51,6 +54,8 @@ defmodule Playmark.Config do
     "subtitle_default" => {:subtitle_default, :string},
     "subtitle_fallback" => {:subtitle_fallback, :string},
     "search_limit" => {:search_limit, :pos_integer},
+    "explore_limit" => {:explore_limit, :pos_integer},
+    "playlist_limit" => {:playlist_limit, :pos_integer},
     "channel_limit" => {:channel_limit, :pos_integer},
     "oembed_timeout_ms" => {:oembed_timeout_ms, :pos_integer},
     "oembed_concurrency" => {:oembed_concurrency, :pos_integer},
@@ -129,6 +134,7 @@ defmodule Playmark.Config do
 
   defp coerce(:player, "mpv"), do: {:ok, :mpv}
   defp coerce(:player, "vlc"), do: {:ok, :vlc}
+  defp coerce(:player, "ffplay"), do: {:ok, :ffplay}
   defp coerce(:player, _), do: :error
 
   defp coerce(:boolean, value) when value in ~w(true yes on 1), do: {:ok, true}

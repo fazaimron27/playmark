@@ -1,48 +1,45 @@
 defmodule Playmark.Playlists do
   @moduledoc """
-  Context for registering local directories as playlists.
+  Context for saved YouTube playlists.
 
-  A playlist stores only the directory path and a display name (its basename).
-  The files inside are never stored — they're read live via `Playmark.Local`
-  each time the playlist is opened, so the list is always current. This mirrors
-  `Playmark.Subscriptions`, which stores a channel URL and fetches its videos on
-  open.
+  Only playlist metadata is persisted. Entries are fetched live through
+  `Playmark.YouTubePlaylist` whenever a playlist is opened.
   """
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{Playlist, Repo}
+  alias Playmark.{Playlist, Repo, YouTube, YouTubePlaylist}
 
-  @doc """
-  Lists all playlists, newest first.
-  """
+  @doc "Lists saved YouTube playlists, newest first."
   def list_playlists do
-    Repo.all(from(p in Playlist, order_by: [desc: p.inserted_at]))
+    Repo.all(from(playlist in Playlist, order_by: [desc: playlist.inserted_at]))
   end
 
-  @doc """
-  Registers a local directory as a playlist, deriving its name from the
-  directory's basename.
-
-  The path is expanded (so `~` and relative paths resolve) and must be an
-  existing directory. Returns `{:ok, playlist}` or `{:error, reason}`.
-  """
-  def add_playlist(path) when is_binary(path) do
-    path = path |> String.trim() |> Path.expand()
-
-    if File.dir?(path) do
-      %Playlist{}
-      |> Playlist.changeset(%{path: path, name: Path.basename(path)})
-      |> Repo.insert()
-    else
-      {:error, "not a directory: #{path}"}
+  @doc "Resolves and saves a YouTube playlist URL."
+  def add_playlist(input) when is_binary(input) do
+    with {:ok, url} <- YouTube.canonical_playlist_url(input),
+         {:ok, metadata} <- youtube_playlist().metadata(url) do
+      insert_playlist(url, metadata.title, Map.get(metadata, :channel))
     end
   end
 
-  @doc """
-  Deletes a playlist.
-  """
-  def delete_playlist(%Playlist{} = playlist) do
-    Repo.delete(playlist)
+  @doc "Saves an already-resolved YouTube playlist container."
+  def save_playlist(%{url: input, title: title} = playlist, channel \\ nil)
+      when is_binary(input) and is_binary(title) do
+    with {:ok, url} <- YouTube.canonical_playlist_url(input) do
+      insert_playlist(url, title, Map.get(playlist, :channel) || channel)
+    end
   end
+
+  @doc "Deletes a saved YouTube playlist."
+  def delete_playlist(%Playlist{} = playlist), do: Repo.delete(playlist)
+
+  defp insert_playlist(url, title, channel) do
+    %Playlist{}
+    |> Playlist.changeset(%{url: url, title: title, channel: channel})
+    |> Repo.insert()
+  end
+
+  defp youtube_playlist,
+    do: Application.get_env(:playmark, :youtube_playlist_impl, YouTubePlaylist)
 end

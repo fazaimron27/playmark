@@ -50,7 +50,7 @@ defmodule Playmark.YouTube do
   distinct playlists; pasting `.../@handle/videos` would otherwise be stored and
   re-fetched as that exact tab forever, differing from `.../@handle`. Normalizing
   on add lets the app hold one canonical URL and choose the tab itself (see
-  `Playmark.Channel.list_videos/3`).
+  `Playmark.Channel.list_videos/2`).
 
   Deliberately conservative: only a known tab word as the *final* path segment is
   removed (with any trailing slash). Watch links (`watch?v=`, `youtu.be/ID`) and
@@ -71,6 +71,30 @@ defmodule Playmark.YouTube do
 
   def canonical_channel_url(url), do: url
 
+  @doc """
+  Returns the canonical URL for a YouTube playlist identified by the `list`
+  query parameter.
+
+  Direct playlist URLs and watch/share URLs carrying `list=` normalize to the
+  same URL, so saving equivalent links cannot create duplicate records.
+  """
+  def canonical_playlist_url(url) when is_binary(url) do
+    url = String.trim(url)
+
+    with {:ok, _url} <- validate(url),
+         %URI{query: query} when is_binary(query) <- URI.parse(url),
+         {:ok, params} <- decode_query(query),
+         id when is_binary(id) <- Map.get(params, "list"),
+         id when id != "" <- String.trim(id) do
+      {:ok, "https://www.youtube.com/playlist?" <> URI.encode_query(%{"list" => id})}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, "not a YouTube playlist URL"}
+    end
+  end
+
+  def canonical_playlist_url(_url), do: {:error, "not a YouTube playlist URL"}
+
   # Drops a trailing "/<tab>" (or "/<tab>/") when <tab> is a known channel tab,
   # preserving the rest of the path. A path without a trailing tab is returned
   # unchanged.
@@ -87,5 +111,11 @@ defmodule Playmark.YouTube do
       _ ->
         path
     end
+  end
+
+  defp decode_query(query) do
+    {:ok, URI.decode_query(query)}
+  rescue
+    ArgumentError -> {:error, "not a YouTube playlist URL"}
   end
 end

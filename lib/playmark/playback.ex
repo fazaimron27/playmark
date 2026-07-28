@@ -6,16 +6,20 @@ defmodule Playmark.Playback do
   It reads user config once per call, builds the resolved `t:Playmark.Player.opts/0`
   map, and hands off to the backend for the configured player:
 
-    * `:mpv` (default) — `Playmark.Player.Mpv`. The YouTube URL goes straight to
+    * `:mpv` — `Playmark.Player.Mpv`. The YouTube URL goes straight to
       mpv, which drives `yt-dlp` itself for the stream.
     * `:vlc` — `Playmark.Player.Vlc`. VLC can't fetch YouTube pages, so the backend
       resolves stream URLs with `yt-dlp` first, then hands VLC the raw stream(s).
+    * `:ffplay` — `Playmark.Player.Ffplay`. Like VLC it pre-resolves with `yt-dlp`,
+      but forces a single muxed stream (no `--input-slave`) and skips captions —
+      a minimal, no-extra-install tier.
 
-  Both backends attach captions the same way — as a downloaded `.vtt` sidecar
-  (see below and `Playmark.Player.Captions`). Splitting the two players into their
-  own modules keeps each one's stream quirks contained. This module owns only what
-  they share: reading config (player, quality, captions) and the `run/2` helper
-  that shells out and maps the exit status to `:ok` / `{:error, reason}`.
+  The mpv and VLC backends attach captions as a downloaded `.vtt` sidecar; ffplay
+  skips captions. Splitting the players into their own modules keeps each one's
+  stream quirks contained. This module owns only what they share: reading config
+  (player, quality, captions) and the `run/2` helper used by the unmonitored
+  ffplay backend. mpv and VLC use `Playmark.Player.Control` for position-aware
+  Port and control-socket monitoring.
 
   ## Player clients (why two of them)
 
@@ -32,9 +36,9 @@ defmodule Playmark.Playback do
       URLs 403, so it can't double as the stream client.
 
   Because the two clients are mutually exclusive, captions can't ride along with
-  stream resolution. Both backends download the caption track separately (with
-  `@subtitle_client`) into a temp `.vtt` and hand it to the player as a sidecar.
-  See `Playmark.Player.Captions`.
+  stream resolution. The mpv and VLC backends download the caption track
+  separately (with `@subtitle_client`) into a temp `.vtt` and hand it to the
+  player as a sidecar. See `Playmark.Player.Captions`.
   """
 
   require Logger
@@ -65,25 +69,25 @@ defmodule Playmark.Playback do
   @doc """
   Resolves and plays `url` in the configured player.
 
-  Returns `:ok` on success or `{:error, reason}`. Blocks for the duration of
-  playback.
+  Returns a clean completion reason or `{:error, reason}`. Blocks for the
+  duration of playback.
   """
-  def play(url) when is_binary(url), do: play(url, player(), nil, &no_op/1)
+  def play(url) when is_binary(url), do: play(url, player(), nil, &no_op/1, nil)
 
   @doc """
   Plays `url`, reporting progress through `progress` — a 1-arity function called
   with a stage atom (`:resolving`, `:captions`, `:playing`) as playback advances,
-  or an explicit `player` atom (`:mpv`/`:vlc`) to override the configured player.
+  or an explicit `player` atom (`:mpv`/`:vlc`/`:ffplay`) to override the configured player.
 
   The progress form is what the TUI uses to drive step-by-step feedback; the
   player form ignores config and is mainly for diagnostics/tests. Caption/quality
   options always come from config.
   """
   def play(url, progress) when is_binary(url) and is_function(progress, 1),
-    do: play(url, player(), nil, progress)
+    do: play(url, player(), nil, progress, nil)
 
   def play(url, player) when is_binary(url) and is_atom(player),
-    do: play(url, player, nil, &no_op/1)
+    do: play(url, player, nil, &no_op/1, nil)
 
   @doc """
   Plays `url` with display `meta` (a `%{title, author}` map handed to the player
@@ -93,45 +97,68 @@ defmodule Playmark.Playback do
   """
   def play(url, meta, progress)
       when is_binary(url) and (is_map(meta) or is_nil(meta)) and is_function(progress, 1),
-      do: play(url, player(), meta, progress)
+      do: play(url, player(), meta, progress, nil)
 
   # Explicit-player form without meta (defaults to nil). Same play/3 arity as the
   # meta form above; the atom second arg is what distinguishes it.
-  def play(url, :mpv, progress) when is_binary(url), do: play(url, :mpv, nil, progress)
-  def play(url, :vlc, progress) when is_binary(url), do: play(url, :vlc, nil, progress)
+  def play(url, :mpv, progress) when is_binary(url), do: play(url, :mpv, nil, progress, nil)
+  def play(url, :vlc, progress) when is_binary(url), do: play(url, :vlc, nil, progress, nil)
+  def play(url, :ffplay, progress) when is_binary(url), do: play(url, :ffplay, nil, progress, nil)
   def play(_url, other, _progress), do: {:error, "unsupported player: #{inspect(other)}"}
 
   @doc """
-  Plays `url` in an explicit `player` with display `meta` and a progress reporter.
+  Plays `url` with display metadata, a progress reporter, and optionally an
+  explicit player or resume offset.
   """
+  def play(url, meta, progress, start_position_ms)
+      when is_binary(url) and (is_map(meta) or is_nil(meta)) and is_function(progress, 1) and
+             (is_nil(start_position_ms) or
+                (is_integer(start_position_ms) and start_position_ms >= 0)),
+      do: play(url, player(), meta, progress, start_position_ms)
+
   def play(url, :mpv, meta, progress) when is_binary(url),
-    do: Player.Mpv.play(url, opts(meta, progress))
+    do: play(url, :mpv, meta, progress, nil)
 
   def play(url, :vlc, meta, progress) when is_binary(url),
-    do: Player.Vlc.play(url, opts(meta, progress))
+    do: play(url, :vlc, meta, progress, nil)
+
+  def play(url, :ffplay, meta, progress) when is_binary(url),
+    do: play(url, :ffplay, meta, progress, nil)
 
   def play(_url, other, _meta, _progress),
+    do: {:error, "unsupported player: #{inspect(other)}"}
+
+  def play(url, :mpv, meta, progress, start_position_ms) when is_binary(url),
+    do: Player.Mpv.play(url, opts(meta, progress, start_position_ms))
+
+  def play(url, :vlc, meta, progress, start_position_ms) when is_binary(url),
+    do: Player.Vlc.play(url, opts(meta, progress, start_position_ms))
+
+  def play(url, :ffplay, meta, progress, _start_position_ms) when is_binary(url),
+    do: Player.Ffplay.play(url, opts(meta, progress, nil))
+
+  def play(_url, other, _meta, _progress, _start_position_ms),
     do: {:error, "unsupported player: #{inspect(other)}"}
 
   @doc """
   Plays a local media file `path` in the configured player.
 
-  Local files need no stream resolution or subtitle download — both players
-  auto-load a sidecar `.srt`/`.vtt` next to the file — so the path is handed
-  straight to the player. Returns `:ok` or `{:error, reason}` and blocks for the
-  duration of playback.
+  Local files need no stream resolution or subtitle download, so the path is
+  handed straight to the player. mpv and VLC may auto-load a matching sidecar;
+  playmark does not attach one for ffplay. Returns a clean completion reason or
+  `{:error, reason}` and blocks for the duration of playback.
   """
-  def play_local(path) when is_binary(path), do: play_local(path, player(), nil, &no_op/1)
+  def play_local(path) when is_binary(path), do: play_local(path, player(), nil, &no_op/1, nil)
 
   @doc """
   Plays local `path`, reporting progress through `progress`, or in an explicit
   `player`. Mirrors `play/2`'s two arities.
   """
   def play_local(path, progress) when is_binary(path) and is_function(progress, 1),
-    do: play_local(path, player(), nil, progress)
+    do: play_local(path, player(), nil, progress, nil)
 
   def play_local(path, player) when is_binary(path) and is_atom(player),
-    do: play_local(path, player, nil, &no_op/1)
+    do: play_local(path, player, nil, &no_op/1, nil)
 
   @doc """
   Plays local `path` with display `meta` and a progress reporter. The form the
@@ -139,32 +166,58 @@ defmodule Playmark.Playback do
   """
   def play_local(path, meta, progress)
       when is_binary(path) and (is_map(meta) or is_nil(meta)) and is_function(progress, 1),
-      do: play_local(path, player(), meta, progress)
+      do: play_local(path, player(), meta, progress, nil)
 
   # Explicit-player form without meta (defaults to nil). Same play_local/3 arity
   # as the meta form above; the atom second arg distinguishes it.
   def play_local(path, :mpv, progress) when is_binary(path),
-    do: play_local(path, :mpv, nil, progress)
+    do: play_local(path, :mpv, nil, progress, nil)
 
   def play_local(path, :vlc, progress) when is_binary(path),
-    do: play_local(path, :vlc, nil, progress)
+    do: play_local(path, :vlc, nil, progress, nil)
+
+  def play_local(path, :ffplay, progress) when is_binary(path),
+    do: play_local(path, :ffplay, nil, progress, nil)
 
   def play_local(_path, other, _progress), do: {:error, "unsupported player: #{inspect(other)}"}
 
   @doc """
-  Plays local `path` in an explicit `player` with display `meta` and a reporter.
+  Plays local `path` with display metadata, a progress reporter, and optionally
+  an explicit player or resume offset.
   """
+  def play_local(path, meta, progress, start_position_ms)
+      when is_binary(path) and (is_map(meta) or is_nil(meta)) and is_function(progress, 1) and
+             (is_nil(start_position_ms) or
+                (is_integer(start_position_ms) and start_position_ms >= 0)),
+      do: play_local(path, player(), meta, progress, start_position_ms)
+
   def play_local(path, :mpv, meta, progress) when is_binary(path),
-    do: Player.Mpv.play_local(path, opts(meta, progress))
+    do: play_local(path, :mpv, meta, progress, nil)
 
   def play_local(path, :vlc, meta, progress) when is_binary(path),
-    do: Player.Vlc.play_local(path, opts(meta, progress))
+    do: play_local(path, :vlc, meta, progress, nil)
+
+  def play_local(path, :ffplay, meta, progress) when is_binary(path),
+    do: play_local(path, :ffplay, meta, progress, nil)
 
   def play_local(_path, other, _meta, _progress),
     do: {:error, "unsupported player: #{inspect(other)}"}
 
+  def play_local(path, :mpv, meta, progress, start_position_ms) when is_binary(path),
+    do: Player.Mpv.play_local(path, opts(meta, progress, start_position_ms))
+
+  def play_local(path, :vlc, meta, progress, start_position_ms) when is_binary(path),
+    do: Player.Vlc.play_local(path, opts(meta, progress, start_position_ms))
+
+  def play_local(path, :ffplay, meta, progress, _start_position_ms) when is_binary(path),
+    do: Player.Ffplay.play_local(path, opts(meta, progress, nil))
+
+  def play_local(_path, other, _meta, _progress, _start_position_ms),
+    do: {:error, "unsupported player: #{inspect(other)}"}
+
   @doc """
-  The configured player (`:mpv` by default).
+  The configured player. Falls back to `:mpv` only when no application setting
+  exists; the shipped configuration selects `:vlc`.
   """
   def player, do: Application.get_env(:playmark, :player, :mpv)
 
@@ -174,6 +227,10 @@ defmodule Playmark.Playback do
   def executable(player \\ player())
   def executable(:mpv), do: Player.Mpv.executable()
   def executable(:vlc), do: Player.Vlc.executable()
+  def executable(:ffplay), do: Player.Ffplay.executable()
+
+  @doc "Whether the configured player supports persisted resume checkpoints."
+  def resume_supported?, do: player() in [:mpv, :vlc]
 
   @doc """
   The user's `:max_height` cap in pixels (default #{@default_max_height}), the
@@ -217,14 +274,15 @@ defmodule Playmark.Playback do
   defdelegate parse_stream_urls(output), to: Player.Vlc
 
   @doc """
-  Runs `executable` with `args`, returning `:ok` on exit 0 or `{:error, reason}`.
+  Runs `executable` with `args`, returning `{:ok, :unknown}` on exit 0 or
+  `{:error, reason}`.
 
   Shared by the player backends; blocks for the child's lifetime.
   """
   def run(executable, args) do
     case System.cmd(executable, args, stderr_to_stdout: true) do
       {_output, 0} ->
-        :ok
+        {:ok, :unknown}
 
       {output, code} ->
         {:error, "#{executable} exited with #{code}: #{String.trim(output)}"}
@@ -253,7 +311,7 @@ defmodule Playmark.Playback do
   # defaults to a no-op so backends may call it unconditionally. `meta` is a
   # `%{title, author}` display map (or nil); each field flows to a player flag
   # (nil when unknown — the backend then adds no flag for it).
-  defp opts(meta, progress) do
+  defp opts(meta, progress, start_position_ms) do
     %{
       format: format(),
       subtitles?: subtitles?(),
@@ -262,6 +320,7 @@ defmodule Playmark.Playback do
       player_client: @player_client,
       subtitle_client: @subtitle_client,
       progress: progress,
+      start_position_ms: start_position_ms,
       title: meta_field(meta, :title),
       author: meta_field(meta, :author)
     }

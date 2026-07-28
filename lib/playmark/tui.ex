@@ -2,53 +2,59 @@ defmodule Playmark.TUI do
   @moduledoc """
   The playmark terminal UI.
 
-  A LiveView-style ExRatatui app with three top-level views — Bookmarks,
-  Subscriptions, and Search — cycled with `Tab`, and a mode state machine layered
-  on top:
+  A LiveView-style ExRatatui app with four top-level views — Bookmarks,
+  Subscriptions, Playlists, and Locals — cycled with `Tab`, and a mode state machine
+  layered on top:
 
-    * `:list`     — browse the current view's list. `j`/`k` move, `a` adds
-                    (`/` in Search, which opens a query prompt), `d` deletes
+    * `:list`     — browse the current view's list. `j`/`k` move, `a` adds, `d` deletes
                     (via a `:confirm` prompt), `Tab` cycles view, `q` quits.
-                    `Enter` plays a bookmark or opens a subscription's latest
-                    videos (the Search view holds no list here — results arrive
-                    in `:videos`).
-    * `:input`    — type into a `TextInput`. `Enter` submits, `Esc` cancels.
-                    Adds a bookmark, adds a subscription, or runs a YouTube
-                    search depending on the active view.
+                    `Enter` plays a bookmark or opens a saved source.
+    * `:input`    — type into a `TextInput` while adding a persisted item.
     * `:filter`   — type an incremental filter over the current browse list
-                    (`:list` for bookmarks/subscriptions/local, or `:videos`).
+                    (`:list` for bookmarks/subscriptions/playlists/locals, or `:videos`).
                     Opened with `/`; the list narrows as you type. `Enter`/`Esc`
                     close the field keeping the term; in the base mode `Esc`
-                    clears an active filter. `/` in Search stays the query prompt.
-    * `:fetching` — a background task is adding a bookmark/subscription.
-    * `:loading`  — a background task is listing a channel's videos or running a
-                    search.
-    * `:videos`   — browse a subscription's latest videos or a search's results.
-                    `Enter` plays, `b` bookmarks the selected video, `Esc` goes
-                    back to the view it was opened from. On a subscription
-                    listing, `s`/`v` flip between the channel's Streams and Videos
-                    tabs (re-fetching in place); the Streams tab badges each row's
-                    live status. `s`/`v` are no-ops for search/local listings.
-    * `:playing`  — an external player owns the screen; keys are ignored until
-                    it closes.
+                    clears an active filter.
+    * `:fetching` — a background task is adding an item to a top-level view.
+    * `:loading`  — a background task is listing a saved source.
+    * `:videos`   — browse a subscription, playlist, or local directory.
+                     `Enter` plays media or opens a local folder; `r` refreshes
+                     that folder; `Esc` restores its parent/origin. On a direct subscription listing,
+                     `s`/`v` switch Streams/Videos and `p` opens channel playlists.
+    * `:channel_playlists_loading` / `:channel_playlists` /
+      `:channel_playlists_filter` — fetch and browse a channel's non-playable
+                     playlist containers. `Enter` opens one into `:videos`; `p`
+                     saves it to the top-level Playlists view.
+    * `:playing`  — the playback task is preparing or running the external
+                     player; only `Q` is accepted until it finishes.
+    * `:resume`   — a saved checkpoint is waiting for `y` (resume), `n` (start
+                     over), or `Esc` (cancel). The originating page stays visible.
     * `:confirm`  — a destructive action (list `d` delete, queue/history `d`
                     single-item remove, or queue/history `c` clear) is staged
                     behind a `y`/`n` prompt; `y` performs it, any other key
                     cancels. The underlying list/queue/history stays on screen
                     with the prompt shown in the footer.
     * `:history`  — browse watch history (an overlay opened with `H` from
-                    `:list`/`:videos`, not over the player). `Enter` replays,
-                    `d` removes one entry, `c` clears all (via `:confirm`),
-                    `Esc` closes back to where it was opened.
+                    any browse mode, not over the player). `Enter` replays,
+                     `d` removes one entry, `c` clears all (via `:confirm`),
+                     `Esc` closes back to where it was opened.
+    * `:explore_loading` / `:explore` — fetch and browse YouTube's recommended
+                    feed, opened with `E` from a base/video/channel-playlist list.
+                    Results are transient; `Esc` restores the underlying page.
+    * `:search_input` / `:search_loading` / `:search_results` / `:search_filter`
+                    — an isolated Search overlay opened with `S` from
+                    a base/video/channel-playlist list. Its rows and filter never
+                    replace the underlying page.
 
-  Subscriptions store only the channel URL and name; the video list is fetched
-  live (via `Playmark.Channel`) each time a subscription is opened, so it is
-  always current and nothing stale is persisted.
+  Subscriptions store only the channel URL and name; channel tabs are fetched
+  live through `Playmark.Channel`. Discovered playlist containers remain
+  transient unless the user saves one to the top-level Playlists view.
 
-  Every operation that shells out or hits the network (adding, listing videos,
-  playback) runs in a spawned task and reports back via `handle_info/2`, so the
-  runtime never blocks. Long-running states accept `Esc` to bail out; a result
-  arriving after a cancel is dropped via a mode guard.
+  Every operation that performs external I/O (adding, listing, playback) runs in
+  a spawned task and reports back via `handle_info/2`, so the runtime never blocks.
+  Fetching and loading states accept `Esc`; Search, Explore, local directories,
+  channel tabs, and playlist loads match request references and terminate tracked
+  tasks. Older add paths discard late results through mode guards.
 
   This module is the `ExRatatui.App` shell: it owns the runtime callbacks and
   routes work to two collaborators — `Playmark.TUI.Actions` for state
@@ -61,8 +67,8 @@ defmodule Playmark.TUI do
   require Logger
 
   alias ExRatatui.Event
-  alias Playmark.{Bookmarks, History, Playlists, Queue, Subscriptions}
-  alias Playmark.TUI.{Actions, View}
+  alias Playmark.{Bookmarks, History, Locals, Playlists, Queue, Subscriptions}
+  alias Playmark.TUI.{Actions, Filter, View}
 
   @impl true
   def mount(_opts) do
@@ -77,6 +83,7 @@ defmodule Playmark.TUI do
        mode: :list,
        bookmarks: Bookmarks.list_bookmarks(),
        subscriptions: Subscriptions.list_subscriptions(),
+       locals: Locals.list_locals(),
        playlists: Playlists.list_playlists(),
        queue: Queue.list_items(),
        videos: [],
@@ -86,29 +93,78 @@ defmodule Playmark.TUI do
        # keys can re-fetch the other tab of the same channel (see Actions.switch_tab/2).
        channel_url: nil,
        video_tab: :videos,
+       videos_return: :list,
+       channel_request_ref: nil,
+       channel_task_pid: nil,
+       playlist_request_ref: nil,
+       playlist_task_pid: nil,
+       playlist_return: :list,
+       loading_return: :list,
+       # Local browsing stays in :videos but keeps a stack of parent snapshots so
+       # Esc can restore the exact directory rows, cursor, and filter immediately.
+       local_root: nil,
+       local_root_name: nil,
+       local_path: nil,
+       local_stack: [],
+       local_pending: nil,
+       local_request_ref: nil,
+       local_task_pid: nil,
+       # Channel playlist containers are a nested, non-playable browse level.
+       # Their cursor/filter survive while one playlist's videos are open.
+       channel_playlists: [],
+       channel_playlist_selected: 0,
+       channel_playlist_filter: "",
+       channel_playlist_channel_name: nil,
+       channel_playlist_channel_url: nil,
+       channel_playlists_return: :videos,
+       channel_playlists_request_ref: nil,
+       channel_playlists_task_pid: nil,
+       channel_playlist_save_ref: nil,
        selected: 0,
        # The selection index inside the queue-manage modal, kept separate from
        # `selected` so opening/closing the modal doesn't disturb the base view's
        # cursor.
        queue_selected: 0,
        # The mode to restore when the queue-manage modal closes (the modal can be
-       # opened from :list, :videos, or :playing).
+       # opened from a browse mode or :playing).
        queue_return: :list,
        # Watch history (newest first), and — like the queue — a modal selection
        # index and the mode to restore when the history modal closes. The history
-       # modal is reachable from :list/:videos only (not over the running player).
+       # modal is reachable from any browse mode (not over the running player).
        history: History.list_items(),
        history_selected: 0,
        history_return: :list,
+       # Explore is a transient YouTube homepage overlay. Its rows and cursor are
+       # separate from `videos`/`selected`, so opening it never disturbs the list
+       # underneath (and never inherits the Locals view's playback semantics).
+       explore_videos: [],
+       explore_selected: 0,
+       explore_return: :list,
+       explore_request_ref: nil,
+       explore_task_pid: nil,
+       # Search is an isolated overlay: its rows, cursor, filter, and request
+       # lifecycle never overwrite the list underneath it.
+       search_videos: [],
+       search_selected: 0,
+       search_query: "",
+       search_filter: "",
+       search_return: :list,
+       search_request_ref: nil,
+       search_task_pid: nil,
        # A pending destructive action awaiting y/n confirmation (%{action, prompt}),
        # nil outside :confirm mode; confirm_return is the mode to restore after.
        confirm: nil,
        confirm_return: :list,
+       # A playable item waiting for the user to resume, start over, or cancel.
+       resume: nil,
        input: input,
        # The active incremental filter term (empty = no filter) and the mode to
        # restore when the filter field closes (:list or :videos).
        filter: "",
        filter_return: :list,
+       # The mode to restore when the help overlay closes. Like the queue/history
+       # modals, help is a static overlay opened over a browse mode.
+       help_return: :list,
        status: nil,
        playing: nil
      }}
@@ -122,12 +178,11 @@ defmodule Playmark.TUI do
     {:noreply, state}
   end
 
-  # "Q" opens the queue-manage modal from anywhere it's reachable — a browsable
-  # list (:list/:videos) or over the running player (:playing). It's the only key
-  # :playing accepts; see the catch-all guard below. Placed before the
-  # mode-specific routes so it wins in those modes too.
+  # "Q" opens the queue manager from any browse mode, including Search and
+  # Explore, or over the running player. It's the only key :playing accepts; see
+  # the catch-all guard below.
   def handle_event(%Event.Key{code: "Q"}, %{mode: mode} = state)
-      when mode in [:list, :videos, :playing] do
+      when mode in [:list, :videos, :channel_playlists, :search_results, :explore, :playing] do
     {:noreply, Actions.open_queue(state)}
   end
 
@@ -135,12 +190,10 @@ defmodule Playmark.TUI do
     Actions.handle_queue_key(key.code, state)
   end
 
-  # "H" opens the watch-history modal from a browsable list (:list/:videos). Unlike
-  # the queue's "Q", it is NOT accepted over the running player — the :playing
-  # catch-all below ignores it. Placed before the mode-specific routes so it wins
-  # in :list/:videos too.
+  # "H" opens watch history from any browse mode, including Search and Explore.
+  # Unlike the queue's "Q", it is not accepted over the running player.
   def handle_event(%Event.Key{code: "H"}, %{mode: mode} = state)
-      when mode in [:list, :videos] do
+      when mode in [:list, :videos, :channel_playlists, :search_results, :explore] do
     {:noreply, Actions.open_history(state)}
   end
 
@@ -148,11 +201,57 @@ defmodule Playmark.TUI do
     Actions.handle_history_key(key.code, state)
   end
 
+  # "?" opens the keybinding help overlay from any browse mode. `:help` is
+  # deliberately excluded from the allow-list so pressing "?" again inside the
+  # overlay falls through to the :help dispatch clause below, which closes it.
+  def handle_event(%Event.Key{code: "?"}, %{mode: mode} = state)
+      when mode in [:list, :videos, :channel_playlists, :search_results, :explore] do
+    {:noreply, Actions.open_help(state)}
+  end
+
+  def handle_event(%Event.Key{} = key, %{mode: :help} = state) do
+    Actions.handle_help_key(key.code, state)
+  end
+
+  # Explore behaves like the queue/history pages but fetches its transient rows
+  # in the background each time it opens.
+  def handle_event(%Event.Key{code: "E"}, %{mode: mode} = state)
+      when mode in [:list, :videos, :channel_playlists] do
+    {:noreply, Actions.open_explore(state)}
+  end
+
+  def handle_event(%Event.Key{} = key, %{mode: :explore} = state) do
+    Actions.handle_explore_key(key.code, state)
+  end
+
+  # Search is a sibling of Explore and opens only over a base list or an opened
+  # source list. Uppercase S remains distinct from lowercase s (Streams).
+  def handle_event(%Event.Key{code: "S"}, %{mode: mode} = state)
+      when mode in [:list, :videos, :channel_playlists] do
+    {:noreply, Actions.open_search(state)}
+  end
+
+  def handle_event(%Event.Key{} = key, %{mode: :search_input} = state) do
+    Actions.handle_search_input_key(key, state)
+  end
+
+  def handle_event(%Event.Key{} = key, %{mode: :search_results} = state) do
+    Actions.handle_search_key(key.code, state)
+  end
+
+  def handle_event(%Event.Key{} = key, %{mode: :search_filter} = state) do
+    Actions.handle_search_filter_key(key.code, state)
+  end
+
   # A destructive action (list delete, queue/history single-item remove, or
   # queue/history clear) staged behind a yes/no prompt. "y" performs it; any other
   # key cancels (see Actions.handle_confirm_key/2).
   def handle_event(%Event.Key{} = key, %{mode: :confirm} = state) do
     Actions.handle_confirm_key(key.code, state)
+  end
+
+  def handle_event(%Event.Key{} = key, %{mode: :resume} = state) do
+    Actions.handle_resume_key(key.code, state)
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :list} = state) do
@@ -163,26 +262,76 @@ defmodule Playmark.TUI do
     Actions.handle_videos_key(key.code, state)
   end
 
+  def handle_event(%Event.Key{} = key, %{mode: :channel_playlists} = state) do
+    Actions.handle_channel_playlists_key(key.code, state)
+  end
+
+  def handle_event(%Event.Key{} = key, %{mode: :channel_playlists_filter} = state) do
+    Actions.handle_channel_playlists_filter_key(key.code, state)
+  end
+
   def handle_event(%Event.Key{} = key, %{mode: :input} = state) do
     Actions.handle_input_key(key, state)
   end
 
-  # Incremental filter over the current browse list: printable keys append to the
-  # term, backspace deletes, Enter/Esc close the field keeping the term.
+  # Incremental filter over the current browse list: the editor updates the term
+  # live, while Enter/Esc close the field keeping it.
   def handle_event(%Event.Key{} = key, %{mode: :filter} = state) do
     Actions.handle_filter_key(key.code, state)
   end
 
-  # Esc bails out of a background add/list that's taking too long. The task keeps
-  # running but its result is dropped on arrival (see the mode guards in
-  # handle_info), so a hung request can't strand the UI.
+  # Tracked channel/playlist/local tasks are terminated and invalidated on cancel.
+  def handle_event(
+        %Event.Key{code: "esc"},
+        %{mode: :loading, local_request_ref: ref} = state
+      )
+      when not is_nil(ref) do
+    {:noreply, Actions.cancel_local_entries(state)}
+  end
+
+  def handle_event(
+        %Event.Key{code: "esc"},
+        %{mode: :loading, playlist_request_ref: ref} = state
+      )
+      when not is_nil(ref) do
+    {:noreply, Actions.cancel_playlist_videos(state)}
+  end
+
+  def handle_event(
+        %Event.Key{code: "esc"},
+        %{mode: :loading, channel_request_ref: ref} = state
+      )
+      when not is_nil(ref) do
+    {:noreply, Actions.cancel_channel_videos(state)}
+  end
+
+  # Untracked add tasks keep running; mode guards drop late results.
   def handle_event(%Event.Key{code: "esc"}, %{mode: mode} = state)
       when mode in [:fetching, :loading] do
     {:noreply, %{state | mode: Actions.back_mode(state), status: {:info, "Canceled"}}}
   end
 
+  def handle_event(%Event.Key{code: "esc"}, %{mode: :explore_loading} = state) do
+    {:noreply, Actions.cancel_explore(state)}
+  end
+
+  def handle_event(%Event.Key{code: "esc"}, %{mode: :search_loading} = state) do
+    {:noreply, Actions.cancel_search(state)}
+  end
+
+  def handle_event(%Event.Key{code: "esc"}, %{mode: :channel_playlists_loading} = state) do
+    {:noreply, Actions.cancel_channel_playlists(state)}
+  end
+
   def handle_event(%Event.Key{}, %{mode: mode} = state)
-      when mode in [:fetching, :loading, :playing] do
+      when mode in [
+             :fetching,
+             :loading,
+             :channel_playlists_loading,
+             :search_loading,
+             :explore_loading,
+             :playing
+           ] do
     {:noreply, state}
   end
 
@@ -193,11 +342,16 @@ defmodule Playmark.TUI do
     {:noreply, state}
   end
 
+  def handle_event(%Event.Paste{content: content}, %{mode: :search_input} = state) do
+    ExRatatui.text_input_insert_str(state.input, content)
+    {:noreply, state}
+  end
+
   def handle_event(_event, state) do
     {:noreply, state}
   end
 
-  # --- add results (bookmark or subscription) ------------------------------
+  # --- add results ----------------------------------------------------------
 
   # Only acted on while still fetching: if the user canceled with Esc, mode is
   # already back to :list and we drop the late result.
@@ -226,15 +380,27 @@ defmodule Playmark.TUI do
      }}
   end
 
+  def handle_info({:add_result, {:ok, local}, :local}, %{mode: :fetching} = state) do
+    {:noreply,
+     %{
+       state
+       | view: :locals,
+         mode: :list,
+         locals: Locals.list_locals(),
+         selected: 0,
+         status: {:info, "Added: #{local.name}"}
+     }}
+  end
+
   def handle_info({:add_result, {:ok, playlist}, :playlist}, %{mode: :fetching} = state) do
     {:noreply,
      %{
        state
-       | view: :local,
+       | view: :playlists,
          mode: :list,
          playlists: Playlists.list_playlists(),
          selected: 0,
-         status: {:info, "Added: #{playlist.name}"}
+         status: {:info, "Added: #{playlist.title}"}
      }}
   end
 
@@ -252,19 +418,25 @@ defmodule Playmark.TUI do
 
   # --- channel video listing ----------------------------------------------
 
-  def handle_info({:videos_result, {:ok, videos}, name, url, tab}, %{mode: :loading} = state) do
-    label = if tab == :streams, do: "streams", else: "videos"
+  def handle_info(
+        {:videos_result, ref, {:ok, videos}, name, url, tab},
+        %{mode: :loading, channel_request_ref: ref} = state
+      ) do
+    {singular, plural} = if tab == :streams, do: {"stream", "streams"}, else: {"video", "videos"}
 
     status =
       if videos == [],
-        do: {:info, "No #{label} found for #{name}"},
-        else: {:info, "#{length(videos)} #{label} from #{name}"}
+        do: {:info, "No #{plural} found for #{name}"},
+        else: {:info, "#{count_with_label(videos, singular, plural)} from #{name}"}
 
     {:noreply,
      %{
        state
        | mode: :videos,
          videos: videos,
+         videos_return: :list,
+         channel_request_ref: nil,
+         channel_task_pid: nil,
          channel_name: name,
          channel_url: url,
          video_tab: tab,
@@ -279,85 +451,306 @@ defmodule Playmark.TUI do
   # error, rather than dropping back to the subscription list. Otherwise (an
   # initial open) fall back to :list as before.
   def handle_info(
-        {:videos_result, {:error, reason}, _name, url, tab},
-        %{mode: :loading} = state
+        {:videos_result, ref, {:error, reason}, _name, url, tab},
+        %{mode: :loading, channel_request_ref: ref} = state
       ) do
     label = if tab == :streams, do: "streams", else: "videos"
 
-    if is_binary(url) and state.videos != [] do
-      {:noreply, %{state | mode: :videos, status: {:error, "Could not load #{label}: #{reason}"}}}
-    else
-      {:noreply, %{state | mode: :list, status: {:error, "Could not load #{label}: #{reason}"}}}
+    cond do
+      state.loading_return == :channel_playlists ->
+        {:noreply,
+         %{
+           state
+           | mode: :channel_playlists,
+             channel_request_ref: nil,
+             channel_task_pid: nil,
+             status: {:error, "Could not load #{label}: #{reason}"}
+         }}
+
+      is_binary(url) and state.videos != [] ->
+        {:noreply,
+         %{
+           state
+           | mode: :videos,
+             channel_request_ref: nil,
+             channel_task_pid: nil,
+             status: {:error, "Could not load #{label}: #{reason}"}
+         }}
+
+      true ->
+        {:noreply,
+         %{
+           state
+           | mode: :list,
+             channel_request_ref: nil,
+             channel_task_pid: nil,
+             status: {:error, "Could not load #{label}: #{reason}"}
+         }}
     end
   end
 
   # Late video-list result after cancel.
-  def handle_info({:videos_result, _result, _name, _url, _tab}, state), do: {:noreply, state}
+  def handle_info({:videos_result, _ref, _result, _name, _url, _tab}, state),
+    do: {:noreply, state}
 
-  # --- local file listing --------------------------------------------------
-  # A local playlist's files land in the same :videos mode as a channel listing;
-  # the directory name stands in for the channel name as the header label.
+  # --- channel playlist containers ----------------------------------------
 
-  def handle_info({:files_result, {:ok, files}, name}, %{mode: :loading} = state) do
+  def handle_info(
+        {:channel_playlists_result, ref, {:ok, playlists}, name, url},
+        %{mode: :channel_playlists_loading, channel_playlists_request_ref: ref} = state
+      ) do
     status =
-      if files == [],
-        do: {:info, "No media files in #{name}"},
-        else: {:info, "#{length(files)} files in #{name}"}
+      if playlists == [],
+        do: {:info, "No playlists found for #{name}"},
+        else: {:info, "#{count_with_label(playlists, "playlist")} from #{name}"}
+
+    {:noreply,
+     %{
+       state
+       | mode: :channel_playlists,
+         channel_playlists: playlists,
+         channel_playlist_selected: 0,
+         channel_playlist_filter: "",
+         channel_playlist_channel_name: name,
+         channel_playlist_channel_url: url,
+         channel_playlists_request_ref: nil,
+         channel_playlists_task_pid: nil,
+         status: status
+     }}
+  end
+
+  def handle_info(
+        {:channel_playlists_result, ref, {:error, reason}, _name, _url},
+        %{mode: :channel_playlists_loading, channel_playlists_request_ref: ref} = state
+      ) do
+    {:noreply,
+     %{
+       state
+       | mode: state.channel_playlists_return,
+         channel_playlists_request_ref: nil,
+         channel_playlists_task_pid: nil,
+         status: {:error, "Could not load playlists: #{reason}"}
+     }}
+  end
+
+  def handle_info({:channel_playlists_result, _ref, _result, _name, _url}, state),
+    do: {:noreply, state}
+
+  def handle_info(
+        {:channel_playlist_save_result, ref, {:ok, playlist}},
+        %{channel_playlist_save_ref: ref} = state
+      ) do
+    {:noreply,
+     %{
+       state
+       | playlists: Playlists.list_playlists(),
+         channel_playlist_save_ref: nil,
+         status: {:info, "Saved playlist: #{playlist.title}"}
+     }}
+  end
+
+  def handle_info(
+        {:channel_playlist_save_result, ref, {:error, reason}},
+        %{channel_playlist_save_ref: ref} = state
+      ) do
+    {:noreply,
+     %{
+       state
+       | channel_playlist_save_ref: nil,
+         status: {:error, add_error(reason, :playlist)}
+     }}
+  end
+
+  def handle_info({:channel_playlist_save_result, _ref, _result}, state), do: {:noreply, state}
+
+  # --- local entry listing -------------------------------------------------
+
+  def handle_info(
+        {:local_entries_result, ref, {:ok, entries}},
+        %{mode: :loading, local_request_ref: ref, local_pending: pending} = state
+      ) do
+    {selected, filter} = local_result_selection(entries, pending)
+    status = local_result_status(entries, pending)
 
     {:noreply,
      %{
        state
        | mode: :videos,
-         videos: files,
-         channel_name: name,
+         videos: entries,
+         videos_return: :list,
+         channel_name: pending.name,
          channel_url: nil,
          video_tab: :videos,
-         selected: 0,
-         filter: "",
+         local_root: pending.root,
+         local_root_name: pending.root_name,
+         local_path: pending.path,
+         local_stack: pending.stack,
+         local_pending: nil,
+         local_request_ref: nil,
+         local_task_pid: nil,
+         selected: selected,
+         filter: filter,
          status: status
      }}
   end
 
-  def handle_info({:files_result, {:error, reason}, _name}, %{mode: :loading} = state) do
-    {:noreply, %{state | mode: :list, status: {:error, "Could not read directory: #{reason}"}}}
+  def handle_info(
+        {:local_entries_result, ref, {:error, reason}},
+        %{mode: :loading, local_request_ref: ref, local_pending: pending} = state
+      ) do
+    {:noreply,
+     %{
+       state
+       | mode: state.loading_return,
+         local_pending: nil,
+         local_request_ref: nil,
+         local_task_pid: nil,
+         status: {:error, local_entries_error(pending, reason)}
+     }}
   end
 
-  # Late file-list result after cancel.
-  def handle_info({:files_result, _result, _name}, state), do: {:noreply, state}
+  # Late or stale local result after cancel or a newer request.
+  def handle_info({:local_entries_result, _ref, _result}, state), do: {:noreply, state}
 
-  # --- search results ------------------------------------------------------
-  # A search lands in the same :videos mode as a channel listing; the query
-  # stands in for the channel name as the header label.
+  # --- YouTube playlist listing -------------------------------------------
 
-  def handle_info({:search_result, {:ok, videos}, query}, %{mode: :loading} = state) do
+  def handle_info(
+        {:playlist_videos_result, ref, {:ok, videos}, title},
+        %{mode: :loading, playlist_request_ref: ref} = state
+      ) do
     status =
       if videos == [],
-        do: {:info, "No results for #{query}"},
-        else: {:info, "#{length(videos)} results for #{query}"}
+        do: {:info, "No available videos in #{title}"},
+        else: {:info, "#{count_with_label(videos, "video")} from #{title}"}
 
     {:noreply,
      %{
        state
        | mode: :videos,
          videos: videos,
-         channel_name: query,
+         videos_return: state.playlist_return,
+         channel_name: title,
          channel_url: nil,
          video_tab: :videos,
+         playlist_request_ref: nil,
+         playlist_task_pid: nil,
          selected: 0,
          filter: "",
          status: status
      }}
   end
 
-  def handle_info({:search_result, {:error, reason}, _query}, %{mode: :loading} = state) do
-    {:noreply, %{state | mode: :list, status: {:error, "Search failed: #{reason}"}}}
+  def handle_info(
+        {:playlist_videos_result, ref, {:error, reason}, _title},
+        %{mode: :loading, playlist_request_ref: ref} = state
+      ) do
+    state =
+      if state.playlist_return == :channel_playlists do
+        %{
+          state
+          | channel_name: state.channel_playlist_channel_name,
+            channel_url: state.channel_playlist_channel_url
+        }
+      else
+        state
+      end
+
+    {:noreply,
+     %{
+       state
+       | mode: state.playlist_return,
+         playlist_request_ref: nil,
+         playlist_task_pid: nil,
+         status: {:error, "Could not load playlist: #{reason}"}
+     }}
   end
 
-  # Late search result after cancel (mode no longer :loading).
-  def handle_info({:search_result, _result, _query}, state), do: {:noreply, state}
+  def handle_info({:playlist_videos_result, _ref, _result, _title}, state),
+    do: {:noreply, state}
 
-  # --- bookmarking a video from the subscription view ----------------------
-  # Stays in :videos mode; only the status line reflects progress/outcome.
+  # --- Search results ------------------------------------------------------
+
+  def handle_info(
+        {:search_result, ref, {:ok, videos}, query},
+        %{mode: :search_loading, search_request_ref: ref} = state
+      ) do
+    status =
+      if videos == [],
+        do: {:info, "No results for #{query}"},
+        else: {:info, "#{count_with_label(videos, "result")} for #{query}"}
+
+    {:noreply,
+     %{
+       state
+       | mode: :search_results,
+         search_videos: videos,
+         search_selected: 0,
+         search_query: query,
+         search_filter: "",
+         search_request_ref: nil,
+         search_task_pid: nil,
+         status: status
+     }}
+  end
+
+  def handle_info(
+        {:search_result, ref, {:error, reason}, _query},
+        %{mode: :search_loading, search_request_ref: ref} = state
+      ) do
+    {:noreply,
+     %{
+       state
+       | mode: :search_input,
+         search_request_ref: nil,
+         search_task_pid: nil,
+         status: {:error, "Search failed: #{reason}"}
+     }}
+  end
+
+  def handle_info({:search_result, _ref, _result, _query}, state), do: {:noreply, state}
+
+  # --- Explore results -----------------------------------------------------
+
+  def handle_info(
+        {:explore_result, ref, {:ok, videos}},
+        %{mode: :explore_loading, explore_request_ref: ref} = state
+      ) do
+    status =
+      if videos == [],
+        do: {:info, "No recommendations found"},
+        else: {:info, count_with_label(videos, "recommendation")}
+
+    {:noreply,
+     %{
+       state
+       | mode: :explore,
+         explore_videos: videos,
+         explore_selected: 0,
+         explore_request_ref: nil,
+         explore_task_pid: nil,
+         status: status
+     }}
+  end
+
+  def handle_info(
+        {:explore_result, ref, {:error, reason}},
+        %{mode: :explore_loading, explore_request_ref: ref} = state
+      ) do
+    {:noreply,
+     %{
+       state
+       | mode: state.explore_return,
+         explore_request_ref: nil,
+         explore_task_pid: nil,
+         status: {:error, "Explore failed: #{reason}"}
+     }}
+  end
+
+  # A canceled or superseded Explore request must not replace a newer page.
+  def handle_info({:explore_result, _ref, _result}, state), do: {:noreply, state}
+
+  # --- bookmarking a video --------------------------------------------------
+  # Only the status line reflects progress/outcome; the originating list stays open.
 
   def handle_info({:bookmark_video_result, {:ok, bookmark}}, state) do
     {:noreply,
@@ -374,73 +767,99 @@ defmodule Playmark.TUI do
 
   # --- playback ------------------------------------------------------------
 
-  # The caption chain resolved to a concrete track (or none): record it under the
-  # captions submap so the view can show which language/tier was actually chosen,
-  # not just the configured preference. Guarded on :playing like the stage clause.
+  # Playback messages carry a request ref because closing one player and opening
+  # another can leave late Port/socket messages in the mailbox. Only the active
+  # play may update state. Progress remains accepted while Queue is open over the
+  # player, since the playing map still identifies the active request.
   def handle_info(
-        {:play_progress, {:caption, result}},
-        %{mode: :playing, playing: %{captions: captions} = playing} = state
+        {:play_progress, ref, {:caption, result}},
+        %{playing: %{ref: ref, captions: captions} = playing} = state
       )
       when is_map(captions) do
     {:noreply, %{state | playing: %{playing | captions: %{captions | result: result}}}}
   end
 
-  # Stream resolution produced a concrete shape (split video+audio, or a single
-  # muxed stream): record it under the stream submap so the view can firm up the
-  # "Resolving stream" line. Guarded on :playing like the caption clause.
   def handle_info(
-        {:play_progress, {:stream, shape}},
-        %{mode: :playing, playing: %{stream: stream} = playing} = state
+        {:play_progress, ref, {:stream, shape}},
+        %{playing: %{ref: ref, stream: stream} = playing} = state
       )
       when is_map(stream) do
     {:noreply, %{state | playing: %{playing | stream: %{stream | result: shape}}}}
   end
 
-  # A backend advancing through its stages. Fold the stage into the playing map
-  # so the view can mark that step done and light up the next one. Guarded on
-  # :playing mode, so a stage arriving after playback ended (or was left) is
-  # dropped like the other stale async results.
-  def handle_info({:play_progress, stage}, %{mode: :playing, playing: playing} = state)
+  # The caption probe also reports the video's chapter count; fold it into the
+  # playing map so the Now Playing panel can show it (informational only).
+  def handle_info(
+        {:play_progress, ref, {:chapters, count}},
+        %{playing: %{ref: ref} = playing} = state
+      )
+      when is_map(playing) do
+    {:noreply, %{state | playing: %{playing | chapters: count}}}
+  end
+
+  def handle_info({:play_progress, ref, stage}, %{playing: %{ref: ref} = playing} = state)
       when is_map(playing) and is_atom(stage) do
     {:noreply, %{state | playing: %{playing | stage: stage}}}
   end
 
-  def handle_info({:play_progress, _stage}, state), do: {:noreply, state}
+  def handle_info({:play_progress, _ref, _stage}, state), do: {:noreply, state}
 
-  # A queued item finished cleanly: drop it from the queue and, if anything's
-  # left, play the next head — staying in :playing. This is where auto-advance
-  # lives, and why the queue never runs two players at once: the next only starts
-  # now, after the previous one's player closed and sent this message.
-  def handle_info({:play_result, :ok}, %{playing: %{origin: :queue, queue_id: id}} = state) do
-    Queue.remove_by_id(id)
-    queue = Queue.list_items()
-    state = %{state | queue: queue}
-
-    case Queue.head() do
-      nil ->
-        {:noreply, %{state | mode: :list, playing: nil, status: {:info, "Queue finished"}}}
-
-      item ->
-        playable = %{title: item.title, url: item.url, local: item.local}
-        {:noreply, Actions.start_play(playable, :queue, state, item.id)}
-    end
+  # A completed queued item is removed and advances. A stopped item keeps its
+  # place and opens Queue so playback can be resumed later.
+  def handle_info(
+        {:play_result, ref, {:ok, :completed}},
+        %{playing: %{ref: ref, origin: :queue}} = state
+      ) do
+    {:noreply, complete_queued_play(state)}
   end
 
-  def handle_info({:play_result, :ok}, state) do
+  # ffplay has no stable position/end-reason API, so retain its historical clean
+  # exit behavior: an unknown clean exit advances the queue.
+  def handle_info(
+        {:play_result, ref, {:ok, :unknown}},
+        %{playing: %{ref: ref, origin: :queue, player: :ffplay}} = state
+      ) do
+    {:noreply, complete_queued_play(state)}
+  end
+
+  def handle_info(
+        {:play_result, ref, {:ok, reason}},
+        %{playing: %{ref: ref, origin: :queue}} = state
+      )
+      when reason in [:stopped, :unknown] do
+    {:noreply,
+     %{
+       state
+       | mode: :queue_manage,
+         queue_return: Map.get(state.playing, :return_mode, :list),
+         queue: Queue.list_items(),
+         queue_selected: 0,
+         playing: nil,
+         status: {:info, "Playback stopped; progress saved"}
+     }}
+  end
+
+  def handle_info(
+        {:play_result, ref, {:ok, reason}},
+        %{playing: %{ref: ref}} = state
+      )
+      when reason in [:completed, :stopped, :unknown] do
     {:noreply, %{state | mode: play_return_mode(state), playing: nil, status: nil}}
   end
 
   # A queued item failed: stop the queue and surface the error, leaving the failed
-  # item in place so it's visible where playback stopped (stop-and-report, not
-  # skip). Drop to the queue-manage modal so the user sees the remaining items.
-  def handle_info({:play_result, {:error, reason}}, %{playing: %{origin: :queue}} = state) do
+  # item in place so it is visible where playback stopped.
+  def handle_info(
+        {:play_result, ref, {:error, reason}},
+        %{playing: %{ref: ref, origin: :queue}} = state
+      ) do
     Logger.error("Playback failed: #{reason}")
 
     {:noreply,
      %{
        state
        | mode: :queue_manage,
-         queue_return: :list,
+         queue_return: Map.get(state.playing, :return_mode, :list),
          queue: Queue.list_items(),
          queue_selected: 0,
          playing: nil,
@@ -448,7 +867,10 @@ defmodule Playmark.TUI do
      }}
   end
 
-  def handle_info({:play_result, {:error, reason}}, state) do
+  def handle_info(
+        {:play_result, ref, {:error, reason}},
+        %{playing: %{ref: ref}} = state
+      ) do
     Logger.error("Playback failed: #{reason}")
 
     {:noreply,
@@ -459,6 +881,8 @@ defmodule Playmark.TUI do
          status: {:error, "Playback failed: #{reason}"}
      }}
   end
+
+  def handle_info({:play_result, _ref, _result}, state), do: {:noreply, state}
 
   # The status-clear timer fired (see subscriptions/1). Clear the footer status,
   # but only if it still matches the status the timer was armed for — a newer
@@ -499,14 +923,31 @@ defmodule Playmark.TUI do
 
   # --- handle_info helpers -------------------------------------------------
 
-  # After playback, return to whichever list we launched from: the video list if
-  # we were browsing a subscription, otherwise the main list.
+  defp complete_queued_play(%{playing: %{queue_id: id}} = state) do
+    Queue.remove_by_id(id)
+    queue = Queue.list_items()
+    state = %{state | queue: queue}
+
+    case Queue.head() do
+      nil ->
+        return_mode = Map.get(state.playing, :return_mode, :list)
+        %{state | mode: return_mode, playing: nil, status: {:info, "Queue finished"}}
+
+      item ->
+        playable = %{title: item.title, url: item.url, local: item.local, author: item.author}
+        Actions.start_play(playable, :queue, state, item.id)
+    end
+  end
+
+  # Real playback records an explicit destination; the remaining clauses keep
+  # older/forced test states safe.
+  defp play_return_mode(%{playing: %{return_mode: return_mode}}), do: return_mode
   defp play_return_mode(%{videos: videos}) when videos != [], do: :videos
   defp play_return_mode(_state), do: :list
 
   # A duplicate (the unique index on :url / :path) is the common, expected add
   # failure — the raw "url has already been taken" reads poorly, so we map it to a
-  # per-target message. `target` is :bookmark / :subscription / :playlist. Any
+  # per-target message. `target` is :bookmark / :subscription / :local / :playlist. Any
   # other changeset error keeps the generic field-by-field text; a plain reason
   # (e.g. a yt-dlp/oEmbed string) passes through unchanged.
   defp add_error(%Ecto.Changeset{} = changeset, target) do
@@ -521,8 +962,63 @@ defmodule Playmark.TUI do
   end
 
   defp duplicate_message(:subscription), do: "Already subscribed to this channel"
-  defp duplicate_message(:playlist), do: "Directory already registered"
+  defp duplicate_message(:local), do: "Directory already registered"
+  defp duplicate_message(:playlist), do: "Playlist already saved"
   defp duplicate_message(_bookmark), do: "Already bookmarked"
+
+  defp count_with_label(items, singular, plural \\ nil) do
+    count = length(items)
+    label = if count == 1, do: singular, else: plural || singular <> "s"
+    "#{count} #{label}"
+  end
+
+  defp local_entries_status([], name), do: "No media files or folders in #{name}"
+
+  defp local_entries_status(entries, name) do
+    directories = Enum.count(entries, &(&1.kind == :directory))
+    files = length(entries) - directories
+
+    counts =
+      [{directories, "folder"}, {files, "file"}]
+      |> Enum.reject(fn {count, _label} -> count == 0 end)
+      |> Enum.map_join(", ", fn {count, label} -> count_with_number(count, label) end)
+
+    "#{counts} in #{name}"
+  end
+
+  defp local_result_status(entries, pending) do
+    status = local_entries_status(entries, pending.name)
+    {:info, if(Map.get(pending, :refresh, false), do: "Refreshed: #{status}", else: status)}
+  end
+
+  defp local_result_selection(entries, pending) do
+    if Map.get(pending, :refresh, false) do
+      filter = Map.get(pending, :filter, "")
+      visible = Filter.narrow(entries, [:title], filter)
+      selected_id = Map.get(pending, :selected_id)
+
+      selected =
+        Enum.find_index(visible, &(Map.get(&1, :id) == selected_id)) ||
+          min(Map.get(pending, :selected, 0), max(length(visible) - 1, 0))
+
+      {selected, filter}
+    else
+      {0, ""}
+    end
+  end
+
+  defp local_entries_error(pending, reason) do
+    if pending.path == pending.root do
+      ~s(Local directory "#{pending.root_name}" is offline or unavailable: #{reason})
+    else
+      ~s(Local folder "#{pending.name}" is unavailable: #{reason})
+    end
+  end
+
+  defp count_with_number(count, singular) do
+    label = if count == 1, do: singular, else: singular <> "s"
+    "#{count} #{label}"
+  end
 
   defp changeset_errors(changeset) do
     changeset

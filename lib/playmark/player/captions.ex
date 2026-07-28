@@ -6,9 +6,10 @@ defmodule Playmark.Player.Captions do
   *different* yt-dlp player clients. The stream client (`web_safari`) returns URLs
   a plain HTTP client can actually fetch, but YouTube discards its caption tracks
   unless a PO token is supplied. The caption client (`default`) exposes the tracks
-  with no token, but its stream URLs return `HTTP 403`. So both players resolve
-  streams with one client and download captions with another, then hand the
-  downloaded `.vtt` to the player as a sidecar (`--sub-file`).
+  with no token, but its stream URLs return `HTTP 403`. So the caption-capable
+  mpv and VLC backends resolve streams with one client and download captions
+  with another, then hand the downloaded `.vtt` to the player as a sidecar
+  (`--sub-file`). ffplay deliberately skips this path.
 
   This is why both `Playmark.Player.Mpv` and `Playmark.Player.Vlc` share this
   module rather than each fetching captions their own way: the mechanism is
@@ -58,6 +59,9 @@ defmodule Playmark.Player.Captions do
         # it's an uploader or auto-generated track, or that none matched) before
         # the actual fetch, so the "Captions" step can show the concrete result.
         report_selection(opts, selection)
+        # The same probe already carries the video's chapter list, so report its
+        # count for the Now Playing panel at no extra yt-dlp cost.
+        report_chapters(opts, chapters(probe))
 
         case selection do
           {kind, lang} -> fetch(url, opts, kind, lang)
@@ -79,6 +83,15 @@ defmodule Playmark.Player.Captions do
   end
 
   defp report_selection(_opts, _selection), do: :ok
+
+  # Best-effort chapter reporting, mirroring report_selection/2: reuse the same
+  # progress reporter. Absent or non-function means no reporting.
+  defp report_chapters(%{progress: fun}, count) when is_function(fun, 1) do
+    fun.({:chapters, count})
+    :ok
+  end
+
+  defp report_chapters(_opts, _count), do: :ok
 
   @doc """
   Runs the metadata probe and returns `{:ok, json}` or `:error`. Exposed for the
@@ -117,8 +130,25 @@ defmodule Playmark.Player.Captions do
     end
   end
 
-  # --- internal ------------------------------------------------------------
+  @doc """
+  Counts the chapters in a probe result.
 
+  The `yt-dlp -J` probe carries a top-level `"chapters"` array
+  (`[%{"start_time", "end_time", "title"}, …]`) alongside the caption tracks, so
+  the count is free from the probe already run for captions. Returns `0` when the
+  key is absent, empty, or not a list — a video without chapters, or an older
+  probe shape, never crashes. Purely informational: the count is surfaced in the
+  Now Playing panel; playback does no chapter seeking (mpv navigates them
+  natively; VLC/ffplay get pre-resolved URLs). Exposed for testing.
+  """
+  def chapters(probe) when is_map(probe) do
+    case Map.get(probe, "chapters") do
+      list when is_list(list) -> length(list)
+      _ -> 0
+    end
+  end
+
+  # --- internal ------------------------------------------------------------
   # Ask yt-dlp for the full metadata JSON (no download). The caption client is
   # used so caption tracks are actually listed (see moduledoc).
   defp probe(url, opts) do

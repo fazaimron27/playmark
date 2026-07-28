@@ -4,10 +4,9 @@ defmodule Playmark.Search do
 
   `yt-dlp` accepts a `ytsearchN:QUERY` pseudo-URL that returns YouTube's search
   results as a playlist. Combined with `--flat-playlist`, it emits the same
-  `id`/`title` line format `Playmark.Channel` reads for a channel listing, so a
-  search result is indistinguishable from a channel's video list downstream:
-  the TUI drops it into the same `:videos` mode where `Enter` plays and `b`
-  bookmarks.
+  `id`/`title` line format `Playmark.Channel` reads for a channel listing. The TUI
+  keeps these rows in an isolated Search overlay where they can be played,
+  bookmarked, queued, and filtered without replacing the underlying page.
 
   Results follow YouTube's relevance ranking (not date-sorted). For a query like
   "today's news" that surfaces fresh videos in practice, since YouTube already
@@ -28,9 +27,8 @@ defmodule Playmark.Search do
   @default_limit 20
 
   # Bounds each yt-dlp socket read/connect so a black-holed network can't hang a
-  # search forever (matching Playmark.Channel). Esc in the TUI only drops the
-  # result; the timeout is what frees the underlying process. User-overridable via
-  # the :socket_timeout config key (see Playmark.Config).
+  # search forever (matching Playmark.Channel). The TUI terminates its tracked
+  # Search task on cancellation; this remains the final network bound.
   @default_socket_timeout 30
 
   @doc """
@@ -39,7 +37,8 @@ defmodule Playmark.Search do
   `limit` defaults to the user's `:search_limit` (or #{@default_limit}).
 
   Returns `{:ok, [%{id: String.t(), title: String.t(), url: String.t()}]}` or
-  `{:error, reason}`.
+  `{:error, reason}`. Each map also carries `:live`, `:duration`, and `:views`
+  (see `Playmark.Channel.parse_videos/1`).
   """
   def search(query, limit \\ limit()) when is_binary(query) and is_integer(limit) do
     query = String.trim(query)
@@ -67,7 +66,7 @@ defmodule Playmark.Search do
       socket_timeout(),
       "--flat-playlist",
       "--print",
-      "%(id)s#{@sep}%(title)s#{@sep}%(live_status)s",
+      "%(id)s#{@sep}%(title)s#{@sep}%(live_status)s#{@sep}%(duration)s#{@sep}%(view_count)s",
       "ytsearch#{limit}:#{query}"
     ]
   end

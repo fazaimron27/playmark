@@ -4,13 +4,13 @@ defmodule Playmark.SubscriptionsTest do
   alias Playmark.{Subscription, Subscriptions}
 
   describe "list_subscriptions/0" do
-    test "returns subscriptions newest first" do
-      older = insert_subscription("https://youtube.com/@a", "Older", ~N[2026-01-01 00:00:00])
-      newer = insert_subscription("https://youtube.com/@b", "Newer", ~N[2026-02-01 00:00:00])
+    test "returns subscriptions by channel name ascending, regardless of insertion date" do
+      alpha = insert_subscription("https://youtube.com/@a", "Alpha", ~N[2026-01-01 00:00:00])
+      zulu = insert_subscription("https://youtube.com/@z", "Zulu", ~N[2026-02-01 00:00:00])
 
       assert [first, second] = Subscriptions.list_subscriptions()
-      assert first.id == newer.id
-      assert second.id == older.id
+      assert first.id == alpha.id
+      assert second.id == zulu.id
     end
   end
 

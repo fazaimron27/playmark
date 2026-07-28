@@ -3,8 +3,8 @@ defmodule Playmark.Queue do
   Context for the playback queue: an ordered, persisted list of items to play in
   sequence.
 
-  Unlike `Playmark.Subscriptions` and `Playmark.Playlists` — which store only a
-  handle (URL / directory) and fetch their contents live — the queue *is*
+  Unlike `Playmark.Subscriptions`, `Playmark.Playlists`, and `Playmark.Locals` --
+  which store only a source handle and fetch contents live -- the queue *is*
   user-curated content, so it's stored outright, ordering included. Each item
   carries a `local` flag because the play path forks on it: local files go
   straight to the player (`Playmark.Playback.play_local/2`), everything else is a
@@ -50,6 +50,47 @@ defmodule Playmark.Queue do
     |> QueueItem.changeset(attrs)
     |> Repo.insert()
   end
+
+  @doc """
+  Inserts an item so it plays *next* — immediately after the current head.
+
+  Appends via `enqueue/1` (landing at the tail), then walks the new row toward
+  the head with `move_up/1` until it sits at index 1 (just after the head).
+  Reuses the neighbour-swap primitive rather than computing a between-position,
+  because `position` is a plain integer with no unique constraint and no
+  contiguity guarantee — a direct insert would need a localized renumber the
+  swap-based reorder avoids. On an empty queue the item becomes the head; on a
+  single-item queue it's already second. Returns `{:ok, item}` or the
+  `{:error, changeset}` from the initial insert.
+  """
+  def enqueue_next(attrs) when is_map(attrs) do
+    case enqueue(attrs) do
+      {:ok, item} ->
+        promote_to_second(item)
+        {:ok, item}
+
+      error ->
+        error
+    end
+  end
+
+  # Walk `item` toward the head until exactly one item precedes it (index 1), or
+  # it reaches the head (index 0, empty/single-item queue). Each move_up swaps
+  # with the immediate predecessor, so re-reading positions after every step is
+  # unnecessary — the item's own position is what shifts.
+  defp promote_to_second(item) do
+    ids = Repo.all(from(q in QueueItem, order_by: [asc: q.position], select: q.id))
+
+    case Enum.find_index(ids, &(&1 == item.id)) do
+      index when is_integer(index) and index > 1 ->
+        Enum.each(1..(index - 1), fn _ -> move_up(reload(item)) end)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp reload(%QueueItem{id: id}), do: Repo.get(QueueItem, id)
 
   @doc """
   Removes one item from the queue.

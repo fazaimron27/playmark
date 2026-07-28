@@ -3,8 +3,9 @@ defmodule Playmark.Playlist do
   import Ecto.Changeset
 
   schema "playlists" do
-    field(:path, :string)
-    field(:name, :string)
+    field(:url, :string)
+    field(:title, :string)
+    field(:channel, :string)
 
     timestamps()
   end
@@ -12,8 +13,8 @@ defmodule Playmark.Playlist do
   @doc false
   def changeset(playlist, attrs) do
     playlist
-    |> cast(attrs, [:path, :name])
-    |> validate_required([:path, :name])
-    |> unique_constraint(:path)
+    |> cast(attrs, [:url, :title, :channel])
+    |> validate_required([:url, :title])
+    |> unique_constraint(:url)
   end
 end

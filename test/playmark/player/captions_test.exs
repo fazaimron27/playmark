@@ -60,6 +60,25 @@ defmodule Playmark.Player.CaptionsTest do
     end
   end
 
+  describe "chapters/1" do
+    test "returns the chapter count when the array is present" do
+      probe = %{"chapters" => [%{"title" => "Intro"}, %{"title" => "Part 1"}]}
+      assert Captions.chapters(probe) == 2
+    end
+
+    test "returns 0 for an empty chapters array" do
+      assert Captions.chapters(%{"chapters" => []}) == 0
+    end
+
+    test "returns 0 when the key is absent" do
+      assert Captions.chapters(%{"subtitles" => %{}}) == 0
+    end
+
+    test "returns 0 when chapters is not a list" do
+      assert Captions.chapters(%{"chapters" => nil}) == 0
+    end
+  end
+
   describe "cleanup/1" do
     test "removes a downloaded caption file" do
       path =
