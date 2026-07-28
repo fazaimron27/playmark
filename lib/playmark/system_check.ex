@@ -2,9 +2,9 @@ defmodule Playmark.SystemCheck do
   @moduledoc """
   Verifies that the external programs playmark depends on are installed.
 
-  Always requires `yt-dlp`, plus whichever media player is configured
-  (`config :playmark, :player` — `mpv` by default, or `vlc`). We don't require
-  both players, only the one that will actually be used.
+  Always requires `yt-dlp`, plus whichever media player is configured (`vlc` by
+  default, or `mpv`/`ffplay`). We don't require every player, only the one that
+  will actually be used.
   """
 
   require Logger
@@ -14,7 +14,8 @@ defmodule Playmark.SystemCheck do
   @install_hints %{
     "yt-dlp" => "https://github.com/yt-dlp/yt-dlp#installation",
     "mpv" => "https://mpv.io/installation/",
-    "vlc" => "https://www.videolan.org/vlc/"
+    "vlc" => "https://www.videolan.org/vlc/",
+    "ffplay" => "https://ffmpeg.org/download.html"
   }
 
   @doc """

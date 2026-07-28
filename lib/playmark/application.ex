@@ -19,8 +19,7 @@ defmodule Playmark.Application do
     opts = [strategy: :one_for_one, name: Playmark.Supervisor]
 
     with {:ok, pid} <- Supervisor.start_link(children, opts) do
-      # Tests manage migrations themselves (see test_helper.exs) so the SQL
-      # sandbox can own the connection.
+      # Tests create and migrate their throwaway database in test_helper.exs.
       unless Application.get_env(:playmark, :skip_migrations, false), do: migrate!()
       {:ok, pid}
     end

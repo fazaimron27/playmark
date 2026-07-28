@@ -48,6 +48,8 @@ defmodule Playmark.ConfigTest do
         :subtitle_default,
         :subtitle_fallback,
         :search_limit,
+        :explore_limit,
+        :playlist_limit,
         :channel_limit,
         :oembed_timeout_ms,
         :oembed_concurrency,
@@ -94,6 +96,8 @@ defmodule Playmark.ConfigTest do
       subtitle_default = id
       subtitle_fallback = en
       search_limit = 5
+      explore_limit = 8
+      playlist_limit = 100
       channel_limit = 12
       oembed_timeout_ms = 2000
       oembed_concurrency = 4
@@ -109,6 +113,8 @@ defmodule Playmark.ConfigTest do
         assert Application.get_env(:playmark, :subtitle_default) == "id"
         assert Application.get_env(:playmark, :subtitle_fallback) == "en"
         assert Application.get_env(:playmark, :search_limit) == 5
+        assert Application.get_env(:playmark, :explore_limit) == 8
+        assert Application.get_env(:playmark, :playlist_limit) == 100
         assert Application.get_env(:playmark, :channel_limit) == 12
         assert Application.get_env(:playmark, :oembed_timeout_ms) == 2000
         assert Application.get_env(:playmark, :oembed_concurrency) == 4
@@ -162,6 +168,15 @@ defmodule Playmark.ConfigTest do
       in_tmp_config("nonsense = 1\nplayer = vlc\n", fn ->
         assert Config.load() == :ok
         assert Application.get_env(:playmark, :player) == :vlc
+      end)
+    end
+
+    test "coerces the ffplay player" do
+      Application.delete_env(:playmark, :player)
+
+      in_tmp_config("player = ffplay\n", fn ->
+        assert Config.load() == :ok
+        assert Application.get_env(:playmark, :player) == :ffplay
       end)
     end
   end

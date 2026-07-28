@@ -2,9 +2,9 @@ import Config
 
 config :playmark,
   ecto_repos: [Playmark.Repo],
-  # Media player used for playback. Supported: :mpv (default) and :vlc.
-  # mpv drives yt-dlp itself and handles HLS/muxing natively; vlc has stream
-  # URLs pre-resolved by yt-dlp. Override per environment or in a release.
+  # Media player used for playback. Supported: :vlc (default), :mpv, and :ffplay.
+  # mpv drives yt-dlp itself; vlc and ffplay receive URLs pre-resolved by yt-dlp.
+  # Override per environment or in ~/.config/playmark/config.env.
   player: :vlc
 
 config :playmark, Playmark.Repo,

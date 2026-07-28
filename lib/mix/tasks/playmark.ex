@@ -4,8 +4,8 @@ defmodule Mix.Tasks.Playmark do
 
       mix playmark
 
-  Verifies that `yt-dlp` and the configured media player (`mpv` by default,
-  or `vlc` — see `config :playmark, :player`) are installed, then opens the TUI.
+  Loads user configuration, verifies that `yt-dlp` and the configured media
+  player (`vlc` by default, or `mpv`/`ffplay`) are installed, then opens the TUI.
   Use `j`/`k` to navigate, `a` to add a bookmark, `Enter` to play the selected
   video, and `q` to quit.
   """
@@ -15,9 +15,10 @@ defmodule Mix.Tasks.Playmark do
 
   @impl true
   def run(_argv) do
+    {:ok, _apps} = Application.ensure_all_started(:playmark)
+
     case Playmark.SystemCheck.verify() do
       :ok ->
-        Application.ensure_all_started(:playmark)
         quiet_console(fn -> launch_tui() end)
 
       {:error, missing} ->

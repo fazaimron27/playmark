@@ -25,9 +25,9 @@ defmodule Mix.Tasks.Playmark.Debug do
 
   Play mode is for the *other* failure: VLC plays for a while, then closes on its
   own. A one-byte probe can't catch that — it needs the real player running. This
-  launches VLC with the same args `Playmark.Playback` uses, plus `-vv`, and prints
-  each log line prefixed with seconds-since-launch so you can see what VLC reports
-  at the moment it dies (e.g. a failed HLS segment fetch or a signed-URL expiry).
+  launches VLC with the same stream URL layout as normal playback, plus `-vv`,
+  but without caption or display-metadata flags. It prefixes each log line with
+  seconds-since-launch so you can see what VLC reports at the moment it dies.
 
   `Playmark.Playback` uses the `web_safari` client; this task is what identified
   it, and stays around for re-diagnosing new failures.
@@ -119,7 +119,7 @@ defmodule Mix.Tasks.Playmark.Debug do
     case Playmark.Channel.list_videos(url) do
       {:ok, videos} ->
         elapsed = (System.monotonic_time(:millisecond) - started) / 1000
-        shell.info("  loaded #{length(videos)} videos in #{fmt(elapsed)}s (cold)\n")
+        shell.info("  loaded #{video_count(videos)} in #{fmt(elapsed)}s (cold)\n")
 
         # enrich_titles fans out a task per video and holds title strings; force
         # a GC so we measure retained working set, not transient garbage. GC
@@ -159,7 +159,7 @@ defmodule Mix.Tasks.Playmark.Debug do
         warm = (System.monotonic_time(:millisecond) - started) / 1000
         saved = cold - warm
 
-        shell.info("  loaded #{length(videos)} videos in #{fmt(warm)}s (warm)")
+        shell.info("  loaded #{video_count(videos)} in #{fmt(warm)}s (warm)")
         shell.info("  cold #{fmt(cold)}s → warm #{fmt(warm)}s (#{fmt(saved)}s saved)\n")
 
         gc_all()
@@ -292,7 +292,7 @@ defmodule Mix.Tasks.Playmark.Debug do
 
   # Ask each client what it exposes. This is the crux: web_safari commonly reports
   # "no subtitles" while default lists the track. Seeing both side by side is what
-  # explains captions vanishing on both players despite the video having them.
+  # explains captions vanishing on mpv/VLC despite the video having them.
   # `langs` is the configured chain (default + fallback); we flag matches for any.
   defp compare_clients(url, langs, shell) do
     wanted = Enum.reject(langs, &(&1 in [nil, ""]))
@@ -366,18 +366,18 @@ defmodule Mix.Tasks.Playmark.Debug do
 
   # Run the real download the backends run (Playmark.Player.Captions), with the
   # caption client, and report whether a .vtt actually landed. This is the same
-  # code path both players now use, so it reproduces the real outcome.
+  # path the caption-capable mpv and VLC backends use.
   defp probe_download(url, shell) do
     shell.info("\n== Downloading the sidecar (caption client: #{@subtitle_client}) ==")
 
     case Playmark.Player.Captions.download(url, probe_opts()) do
       nil ->
-        shell.info("  no file produced (see debug log). Both players play without captions.")
+        shell.info("  no file produced (see debug log). mpv/VLC play without captions.")
 
       path ->
         size = File.stat!(path).size
         shell.info("  wrote #{path} (#{size} bytes)")
-        shell.info("  → both players get --sub-file=#{path}")
+        shell.info("  → mpv and VLC get --sub-file=#{path}")
         Playmark.Player.Captions.cleanup(path)
     end
   end
@@ -391,8 +391,8 @@ defmodule Mix.Tasks.Playmark.Debug do
     }
   end
 
-  # Print the exact args each backend hands its player. Both attach captions as a
-  # downloaded sidecar (--sub-file); the placeholder stands in for the temp .vtt.
+  # Print the exact args each backend hands its player. mpv and VLC attach the
+  # downloaded sidecar; ffplay deliberately omits it.
   defp show_player_args(url, shell) do
     opts = %{
       format: Playback.format(),
@@ -416,8 +416,19 @@ defmodule Mix.Tasks.Playmark.Debug do
     urls = ["<resolved-stream-url>"]
     shell.info(indent(Enum.join(Playmark.Player.Vlc.launch_args(urls, sub, opts), " \\\n    ")))
 
+    shell.info("\n  ffplay (no YouTube caption sidecar):")
+
     shell.info(
-      "\n  → Both attach the downloaded track with --sub-file and force-select it\n" <>
+      indent(
+        Enum.join(
+          Playmark.Player.Ffplay.play_args("<resolved-muxed-stream-url>", opts),
+          " \\\n    "
+        )
+      )
+    )
+
+    shell.info(
+      "\n  → mpv and VLC attach the downloaded track with --sub-file\n" <>
         "    (mpv --sid=1; VLC shows it by default). If a track downloads but nothing\n" <>
         "    shows, check the .vtt is non-empty and the select flag is present."
     )
@@ -459,7 +470,7 @@ defmodule Mix.Tasks.Playmark.Debug do
     stream_vlc(port, started, shell)
   end
 
-  # Mirror Playmark.Player.Vlc's launch args: single muxed URL, or video + slave audio.
+  # Mirror VLC's stream URL layout: one muxed URL, or video plus slave audio.
   defp vlc_url_args([video]),
     do: ["-f", "--no-video-title-show", "--play-and-exit", video]
 
@@ -574,6 +585,11 @@ defmodule Mix.Tasks.Playmark.Debug do
 
   defp client_args(client),
     do: ["--extractor-args", "youtube:player_client=#{client}"]
+
+  defp video_count(videos) do
+    count = length(videos)
+    "#{count} #{if count == 1, do: "video", else: "videos"}"
+  end
 
   # Probe a stream URL the way VLC does: a ranged GET with VLC's User-Agent,
   # following redirects. Report the final HTTP status.

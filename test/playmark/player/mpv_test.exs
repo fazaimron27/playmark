@@ -71,6 +71,33 @@ defmodule Playmark.Player.MpvTest do
 
       refute Enum.any?(args, &String.starts_with?(&1, "--force-media-title"))
     end
+
+    test "adds the IPC socket and resume offset before the URL" do
+      opts =
+        Map.merge(@opts, %{control_socket: "/tmp/playmark-mpv.sock", start_position_ms: 90_500})
+
+      args = Mpv.play_args("https://youtu.be/x", nil, opts)
+
+      assert "--input-ipc-server=/tmp/playmark-mpv.sock" in args
+      assert "--start=90.500" in args
+      assert List.last(args) == "https://youtu.be/x"
+    end
+  end
+
+  describe "local_args/2" do
+    test "applies control and resume options to local files" do
+      opts = %{
+        title: "Local",
+        control_socket: "/tmp/playmark-mpv.sock",
+        start_position_ms: 120_000
+      }
+
+      args = Mpv.local_args("/videos/local.mp4", opts)
+
+      assert "--input-ipc-server=/tmp/playmark-mpv.sock" in args
+      assert "--start=120" in args
+      assert List.last(args) == "/videos/local.mp4"
+    end
   end
 
   test "executable/0 is mpv" do
