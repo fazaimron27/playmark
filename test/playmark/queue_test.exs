@@ -49,6 +49,44 @@ defmodule Playmark.QueueTest do
     end
   end
 
+  describe "enqueue_next/1" do
+    test "on an empty queue the item becomes the head" do
+      {:ok, _} = Queue.enqueue_next(attrs(%{title: "A", url: "u-a"}))
+      assert Enum.map(Queue.list_items(), & &1.title) == ["A"]
+    end
+
+    test "on a single-item queue the item lands second" do
+      {:ok, _a} = Queue.enqueue(attrs(%{title: "A", url: "u-a"}))
+      {:ok, _b} = Queue.enqueue_next(attrs(%{title: "B", url: "u-b"}))
+      assert Enum.map(Queue.list_items(), & &1.title) == ["A", "B"]
+    end
+
+    test "inserts right after the head, before the rest of the tail" do
+      {:ok, _a} = Queue.enqueue(attrs(%{title: "A", url: "u-a"}))
+      {:ok, _b} = Queue.enqueue(attrs(%{title: "B", url: "u-b"}))
+      {:ok, _c} = Queue.enqueue(attrs(%{title: "C", url: "u-c"}))
+
+      {:ok, _n} = Queue.enqueue_next(attrs(%{title: "N", url: "u-n"}))
+      assert Enum.map(Queue.list_items(), & &1.title) == ["A", "N", "B", "C"]
+    end
+
+    test "tolerates non-contiguous positions left by a delete" do
+      {:ok, a} = Queue.enqueue(attrs(%{title: "A", url: "u-a"}))
+      {:ok, _b} = Queue.enqueue(attrs(%{title: "B", url: "u-b"}))
+      {:ok, _c} = Queue.enqueue(attrs(%{title: "C", url: "u-c"}))
+      {:ok, _} = Queue.remove(a)
+
+      {:ok, _n} = Queue.enqueue_next(attrs(%{title: "N", url: "u-n"}))
+      assert Enum.map(Queue.list_items(), & &1.title) == ["B", "N", "C"]
+    end
+
+    test "returns the insert error without promoting" do
+      assert {:error, changeset} = Queue.enqueue_next(%{title: "no url"})
+      refute changeset.valid?
+      assert Queue.list_items() == []
+    end
+  end
+
   describe "remove/1" do
     test "removes one item and leaves the rest ordered" do
       {:ok, a} = Queue.enqueue(attrs(%{title: "A", url: "u-a"}))
