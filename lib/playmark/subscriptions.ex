@@ -12,10 +12,10 @@ defmodule Playmark.Subscriptions do
   alias Playmark.{Channel, Repo, Subscription, YouTube}
 
   @doc """
-  Lists all subscriptions, newest first.
+  Lists all subscriptions by channel name in ascending order.
   """
   def list_subscriptions do
-    Repo.all(from(s in Subscription, order_by: [desc: s.inserted_at]))
+    Repo.all(from(s in Subscription, order_by: [asc: s.name]))
   end
 
   @doc """
