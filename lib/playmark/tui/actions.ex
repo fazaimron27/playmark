@@ -14,7 +14,7 @@ defmodule Playmark.TUI.Actions do
 
   alias ExRatatui.Event
 
-  alias Playmark.TUI.{Filter, Impl, Nav}
+  alias Playmark.TUI.{Filter, HelpActions, Impl, Nav}
 
   # Called directly, not through `Impl`: the delete paths below, the queue, URL
   # canonicalization, and `Playback`'s config reads (see `Impl`'s moduledoc on
@@ -1191,22 +1191,10 @@ defmodule Playmark.TUI.Actions do
 
   # --- help ----------------------------------------------------------------
 
-  # Open the keybinding help overlay, remembering the mode to restore on close.
-  # Like the queue/history modals it's a static overlay over a browse mode; it
-  # spawns no task and reads no state, so there's nothing to refresh.
-  def open_help(state) do
-    %{state | mode: :help, help_return: state.mode}
-  end
-
-  # "q" quits; "?" and Esc close the overlay back to where it was opened. Every
-  # other key is a no-op — the overlay is purely informational.
-  def handle_help_key("q", state), do: {:stop, state}
-
-  def handle_help_key(code, state) when code in ["esc", "?"] do
-    {:noreply, %{state | mode: state.help_return}}
-  end
-
-  def handle_help_key(_code, state), do: {:noreply, state}
+  # Moved to Playmark.TUI.HelpActions; delegated until the runtime calls it
+  # directly.
+  defdelegate open_help(state), to: HelpActions
+  defdelegate handle_help_key(code, state), to: HelpActions
 
   # --- playback (bookmarks and videos) -------------------------------------
 
