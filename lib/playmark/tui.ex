@@ -75,7 +75,18 @@ defmodule Playmark.TUI do
 
   alias ExRatatui.Event
   alias Playmark.{Bookmarks, History, Locals, Playlists, Queue, Subscriptions}
-  alias Playmark.TUI.{Actions, Filter, View}
+
+  alias Playmark.TUI.{
+    Actions,
+    ExploreActions,
+    Filter,
+    HelpActions,
+    HistoryActions,
+    PlaybackActions,
+    QueueActions,
+    SearchActions,
+    View
+  }
 
   @impl true
   def mount(_opts) do
@@ -190,22 +201,22 @@ defmodule Playmark.TUI do
   # the catch-all guard below.
   def handle_event(%Event.Key{code: "Q"}, %{mode: mode} = state)
       when mode in [:list, :videos, :channel_playlists, :search_results, :explore, :playing] do
-    {:noreply, Actions.open_queue(state)}
+    {:noreply, QueueActions.open_queue(state)}
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :queue_manage} = state) do
-    Actions.handle_queue_key(key.code, state)
+    QueueActions.handle_queue_key(key.code, state)
   end
 
   # "H" opens watch history from any browse mode, including Search and Explore.
   # Unlike the queue's "Q", it is not accepted over the running player.
   def handle_event(%Event.Key{code: "H"}, %{mode: mode} = state)
       when mode in [:list, :videos, :channel_playlists, :search_results, :explore] do
-    {:noreply, Actions.open_history(state)}
+    {:noreply, HistoryActions.open_history(state)}
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :history} = state) do
-    Actions.handle_history_key(key.code, state)
+    HistoryActions.handle_history_key(key.code, state)
   end
 
   # "?" opens the keybinding help overlay from any browse mode. `:help` is
@@ -213,41 +224,41 @@ defmodule Playmark.TUI do
   # overlay falls through to the :help dispatch clause below, which closes it.
   def handle_event(%Event.Key{code: "?"}, %{mode: mode} = state)
       when mode in [:list, :videos, :channel_playlists, :search_results, :explore] do
-    {:noreply, Actions.open_help(state)}
+    {:noreply, HelpActions.open_help(state)}
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :help} = state) do
-    Actions.handle_help_key(key.code, state)
+    HelpActions.handle_help_key(key.code, state)
   end
 
   # Explore behaves like the queue/history pages but fetches its transient rows
   # in the background each time it opens.
   def handle_event(%Event.Key{code: "E"}, %{mode: mode} = state)
       when mode in [:list, :videos, :channel_playlists] do
-    {:noreply, Actions.open_explore(state)}
+    {:noreply, ExploreActions.open_explore(state)}
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :explore} = state) do
-    Actions.handle_explore_key(key.code, state)
+    ExploreActions.handle_explore_key(key.code, state)
   end
 
   # Search is a sibling of Explore and opens only over a base list or an opened
   # source list. Uppercase S remains distinct from lowercase s (Streams).
   def handle_event(%Event.Key{code: "S"}, %{mode: mode} = state)
       when mode in [:list, :videos, :channel_playlists] do
-    {:noreply, Actions.open_search(state)}
+    {:noreply, SearchActions.open_search(state)}
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :search_input} = state) do
-    Actions.handle_search_input_key(key, state)
+    SearchActions.handle_search_input_key(key, state)
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :search_results} = state) do
-    Actions.handle_search_key(key.code, state)
+    SearchActions.handle_search_key(key.code, state)
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :search_filter} = state) do
-    Actions.handle_search_filter_key(key.code, state)
+    SearchActions.handle_search_filter_key(key.code, state)
   end
 
   # A destructive action (list delete, queue/history single-item remove, or
@@ -258,7 +269,7 @@ defmodule Playmark.TUI do
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :resume} = state) do
-    Actions.handle_resume_key(key.code, state)
+    PlaybackActions.handle_resume_key(key.code, state)
   end
 
   def handle_event(%Event.Key{} = key, %{mode: :list} = state) do
@@ -319,11 +330,11 @@ defmodule Playmark.TUI do
   end
 
   def handle_event(%Event.Key{code: "esc"}, %{mode: :explore_loading} = state) do
-    {:noreply, Actions.cancel_explore(state)}
+    {:noreply, ExploreActions.cancel_explore(state)}
   end
 
   def handle_event(%Event.Key{code: "esc"}, %{mode: :search_loading} = state) do
-    {:noreply, Actions.cancel_search(state)}
+    {:noreply, SearchActions.cancel_search(state)}
   end
 
   def handle_event(%Event.Key{code: "esc"}, %{mode: :channel_playlists_loading} = state) do
@@ -942,7 +953,7 @@ defmodule Playmark.TUI do
 
       item ->
         playable = %{title: item.title, url: item.url, local: item.local, author: item.author}
-        Actions.start_play(playable, :queue, state, item.id)
+        PlaybackActions.start_play(playable, :queue, state, item.id)
     end
   end
 

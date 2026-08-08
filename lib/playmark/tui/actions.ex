@@ -1,6 +1,7 @@
 defmodule Playmark.TUI.Actions do
   @moduledoc """
-  State transitions for `Playmark.TUI`: the per-mode key handlers, list
+  State transitions for the **browse core** of `Playmark.TUI`: the list, videos,
+  channel-playlists, filter, input, and local-browse key handlers, their list
   navigation, and the task spawners that shell out or hit the network.
 
   Every function takes the current UI state and returns either a new state map
@@ -10,21 +11,32 @@ defmodule Playmark.TUI.Actions do
   is run in a spawned task that reports back to the runtime process, so the UI
   never stalls. Tracked requests use references; remaining late add results are
   dropped by mode guards in `Playmark.TUI.handle_info/2`.
+
+  This is one state machine and not several, which is why it is not split
+  further: `close_channel_playlists/1` writes 12 keys spanning what look like
+  three separate concerns. The overlays that *are* separable live in sibling
+  modules the runtime calls directly — `PlaybackActions`, `QueueActions`,
+  `HistoryActions`, `SearchActions`, `ExploreActions`, `HelpActions` — and this
+  module reaches them only where a browse-cursor read has to happen first
+  (`play_selected/1`, `enqueue_selected/2`, `bookmark_selected_video/1`) or
+  where a staged confirmation resolves (`perform_confirmed/2`).
+
+  Keeping the machine whole is what keeps `current_list/1` and `selected_item/1`
+  private. Nothing outside this module and `Playmark.TUI.Filter` reads or writes
+  `:selected`, `:filter`, `:videos`, `:channel_name`, `:channel_url`,
+  `:videos_return`, or the `:local_*` keys.
   """
 
   alias ExRatatui.Event
 
   alias Playmark.TUI.{
     AddActions,
-    ExploreActions,
     Filter,
-    HelpActions,
     HistoryActions,
     Impl,
     Nav,
     PlaybackActions,
-    QueueActions,
-    SearchActions
+    QueueActions
   }
 
   # Called directly, not through `Impl`: the delete paths below and URL
@@ -140,10 +152,6 @@ defmodule Playmark.TUI.Actions do
   end
 
   def handle_confirm_key(_code, state), do: {:noreply, cancel_confirm(state)}
-
-  # The resume prompt lives in Playmark.TUI.PlaybackActions — it reads only
-  # `state.resume`, and every path out of it launches a play.
-  defdelegate handle_resume_key(code, state), to: PlaybackActions
 
   defp cancel_confirm(state) do
     %{state | mode: state.confirm_return, confirm: nil, status: {:info, "Canceled"}}
@@ -526,22 +534,7 @@ defmodule Playmark.TUI.Actions do
 
   # --- Explore -------------------------------------------------------------
 
-  # Moved to Playmark.TUI.ExploreActions; delegated until the runtime calls it
-  # directly. Explore keeps its own cursor and rows, so nothing stays behind.
-  defdelegate open_explore(state), to: ExploreActions
-  defdelegate cancel_explore(state), to: ExploreActions
-  defdelegate handle_explore_key(code, state), to: ExploreActions
-
   # --- Search --------------------------------------------------------------
-
-  # Moved to Playmark.TUI.SearchActions; delegated until the runtime calls it
-  # directly. Search keeps its own cursor and filter term, so nothing stays
-  # behind — but the core keeps `Event` and `Filter` for its own handlers.
-  defdelegate open_search(state), to: SearchActions
-  defdelegate handle_search_input_key(event, state), to: SearchActions
-  defdelegate cancel_search(state), to: SearchActions
-  defdelegate handle_search_key(code, state), to: SearchActions
-  defdelegate handle_search_filter_key(code, state), to: SearchActions
 
   # --- queue ---------------------------------------------------------------
 
@@ -568,26 +561,9 @@ defmodule Playmark.TUI.Actions do
     end
   end
 
-  # Moved to Playmark.TUI.QueueActions; delegated until the runtime calls it
-  # directly. `enqueue_selected/2` above stays here because it reads the browse
-  # cursor and the `view == :locals` rule that decides the local? flag.
-  defdelegate open_queue(state), to: QueueActions
-  defdelegate handle_queue_key(code, state), to: QueueActions
-
   # --- history -------------------------------------------------------------
 
-  # Moved to Playmark.TUI.HistoryActions; delegated until the runtime calls it
-  # directly. Unlike the queue there is nothing left behind — no history path
-  # reads the browse cursor.
-  defdelegate open_history(state), to: HistoryActions
-  defdelegate handle_history_key(code, state), to: HistoryActions
-
   # --- help ----------------------------------------------------------------
-
-  # Moved to Playmark.TUI.HelpActions; delegated until the runtime calls it
-  # directly.
-  defdelegate open_help(state), to: HelpActions
-  defdelegate handle_help_key(code, state), to: HelpActions
 
   # --- playback (bookmarks and videos) -------------------------------------
 
@@ -611,10 +587,6 @@ defmodule Playmark.TUI.Actions do
         PlaybackActions.start_play(playable, :list, state)
     end
   end
-
-  # Moved to Playmark.TUI.PlaybackActions; delegated until the runtime calls it
-  # directly. `play_selected/1` stays here because it reads the browse cursor.
-  defdelegate start_play(playable, origin, state, queue_id \\ nil), to: PlaybackActions
 
   # --- opening a subscription (list its videos) ----------------------------
 
