@@ -64,43 +64,51 @@ defmodule Playmark.PlaybackTest do
     end
   end
 
-  describe "subtitles?/0, subtitle_default/0 and subtitle_fallback/0" do
-    test "default to captions on, English default, no fallback, when unset" do
+  describe "subtitles?/0, subtitle_default/0, subtitle_fallback/0 and subtitle_translate/0" do
+    test "default to captions on, English default, no fallback, translation on, when unset" do
       original_on = Application.fetch_env(:playmark, :subtitles)
       original_default = Application.fetch_env(:playmark, :subtitle_default)
       original_fallback = Application.fetch_env(:playmark, :subtitle_fallback)
+      original_translate = Application.fetch_env(:playmark, :subtitle_translate)
       Application.delete_env(:playmark, :subtitles)
       Application.delete_env(:playmark, :subtitle_default)
       Application.delete_env(:playmark, :subtitle_fallback)
+      Application.delete_env(:playmark, :subtitle_translate)
 
       on_exit(fn ->
         restore(:subtitles, original_on)
         restore(:subtitle_default, original_default)
         restore(:subtitle_fallback, original_fallback)
+        restore(:subtitle_translate, original_translate)
       end)
 
       assert Playback.subtitles?() == true
       assert Playback.subtitle_default() == "en"
       assert Playback.subtitle_fallback() == nil
+      assert Playback.subtitle_translate() == true
     end
 
     test "honor configured values" do
       original_on = Application.fetch_env(:playmark, :subtitles)
       original_default = Application.fetch_env(:playmark, :subtitle_default)
       original_fallback = Application.fetch_env(:playmark, :subtitle_fallback)
+      original_translate = Application.fetch_env(:playmark, :subtitle_translate)
       Application.put_env(:playmark, :subtitles, false)
       Application.put_env(:playmark, :subtitle_default, "id")
       Application.put_env(:playmark, :subtitle_fallback, "en")
+      Application.put_env(:playmark, :subtitle_translate, false)
 
       on_exit(fn ->
         restore(:subtitles, original_on)
         restore(:subtitle_default, original_default)
         restore(:subtitle_fallback, original_fallback)
+        restore(:subtitle_translate, original_translate)
       end)
 
       assert Playback.subtitles?() == false
       assert Playback.subtitle_default() == "id"
       assert Playback.subtitle_fallback() == "en"
+      assert Playback.subtitle_translate() == false
     end
   end
 

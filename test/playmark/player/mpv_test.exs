@@ -8,6 +8,7 @@ defmodule Playmark.Player.MpvTest do
     subtitles?: true,
     subtitle_default: "en",
     subtitle_fallback: nil,
+    subtitle_translate: true,
     player_client: "web_safari",
     subtitle_client: "default",
     title: "Some Video Title"

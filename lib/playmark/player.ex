@@ -22,9 +22,11 @@ defmodule Playmark.Player do
     * `:subtitle_default` — first-choice language code for uploader-provided
       captions (e.g. `"en"`).
     * `:subtitle_fallback` — second-choice language for uploader captions, tried
-      when no track matches `:subtitle_default`. `nil` means no fallback. When
-      neither manual track exists, captions fall back to the auto-generated track
-      in the video's spoken language (see `Playmark.Player.Captions`).
+      when no track matches `:subtitle_default`. `nil` means no fallback.
+    * `:subtitle_translate` — whether a machine-translated auto caption track may
+      satisfy either requested language when no uploader track matches. With it
+      off, an unmatched request falls through to the auto-generated track in the
+      video's spoken language (see `Playmark.Player.Captions`).
     * `:player_client` — the `yt-dlp` YouTube player client to force for stream
       resolution (`web_safari` — returns fetchable URLs).
     * `:subtitle_client` — the `yt-dlp` YouTube player client for downloading
@@ -47,6 +49,7 @@ defmodule Playmark.Player do
           subtitles?: boolean(),
           subtitle_default: String.t(),
           subtitle_fallback: String.t() | nil,
+          subtitle_translate: boolean(),
           player_client: String.t(),
           subtitle_client: String.t(),
           progress: (term() -> any()),

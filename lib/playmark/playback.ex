@@ -60,11 +60,13 @@ defmodule Playmark.Playback do
   @default_max_height 1080
 
   # Caption defaults (see Playmark.Config): captions on, preferring uploader subs
-  # in English, no second-choice language, and the auto-generated track in the
-  # video's spoken language as the final fallback.
+  # in English, no second-choice language, machine-translated auto captions
+  # accepted, and the auto-generated track in the video's spoken language as the
+  # final fallback.
   @default_subtitles true
   @default_subtitle_default "en"
   @default_subtitle_fallback nil
+  @default_subtitle_translate true
 
   @doc """
   Resolves and plays `url` in the configured player.
@@ -266,6 +268,20 @@ defmodule Playmark.Playback do
     do: Application.get_env(:playmark, :subtitle_fallback, @default_subtitle_fallback)
 
   @doc """
+  Whether a machine-translated auto caption track may satisfy the requested
+  language (default `#{@default_subtitle_translate}`).
+
+  YouTube lists the spoken transcript machine-translated into ~150 languages
+  among a video's automatic captions, so with this on a request for `"en"` is
+  met even on a video with no English audio or uploader subtitles. Turn it off to
+  keep the previous behavior, where an unmatched request falls through to the
+  auto-generated track in the video's *spoken* language. See
+  `Playmark.Player.Captions`.
+  """
+  def subtitle_translate,
+    do: Application.get_env(:playmark, :subtitle_translate, @default_subtitle_translate)
+
+  @doc """
   Delegates to `Playmark.Player.Vlc.parse_stream_urls/1`.
 
   Kept here as the historical entry point; the parsing itself lives with the VLC
@@ -317,6 +333,7 @@ defmodule Playmark.Playback do
       subtitles?: subtitles?(),
       subtitle_default: subtitle_default(),
       subtitle_fallback: subtitle_fallback(),
+      subtitle_translate: subtitle_translate(),
       player_client: @player_client,
       subtitle_client: @subtitle_client,
       progress: progress,
