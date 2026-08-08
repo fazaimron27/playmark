@@ -276,6 +276,11 @@ defmodule Mix.Tasks.Playmark.Debug do
     shell.info("  subtitles?         #{Playback.subtitles?()}")
     shell.info("  subtitle_default   #{inspect(default)} (uploader subs, first choice)")
     shell.info("  subtitle_fallback  #{inspect(fallback)} (uploader subs, second choice)")
+
+    shell.info(
+      "  subtitle_translate #{Playback.subtitle_translate()} (accept machine translation)"
+    )
+
     shell.info("  auto fallback      spoken language (auto-generated)")
     shell.info("  stream client      #{@player_client} (fetchable URLs; drops captions)")
     shell.info("  caption client     #{@subtitle_client} (exposes captions)")
@@ -352,6 +357,34 @@ defmodule Mix.Tasks.Playmark.Debug do
           {:manual, key} ->
             shell.info("  → manual (uploader) track #{inspect(key)}")
 
+          {:translated, key} ->
+            # A `{target}-{source}` key translates that uploader track; a plain
+            # key translates the ASR transcript. Name the source either way —
+            # it's the difference between one lossy pass and two. Split only when
+            # the suffix names a real manual track, mirroring `auto_kind/2`, so a
+            # regional variant like "en-US" isn't read as "en from US".
+            manual = probe |> Map.get("subtitles", %{}) |> Map.keys()
+
+            source =
+              case String.split(key, "-", parts: 2) do
+                [_target, s] -> if s in manual, do: s, else: nil
+                _ -> nil
+              end
+
+            if source do
+              [target | _] = String.split(key, "-", parts: 2)
+
+              shell.info(
+                "  → auto-translated track #{inspect(key)}: #{target} " <>
+                  "machine-translated from the uploader's #{source} track"
+              )
+            else
+              shell.info(
+                "  → auto-translated track #{inspect(key)}: machine-translated " <>
+                  "from the auto-generated transcript"
+              )
+            end
+
           {:auto, key} ->
             shell.info("  → auto-generated track #{inspect(key)} (spoken language)")
 
@@ -387,7 +420,8 @@ defmodule Mix.Tasks.Playmark.Debug do
     %{
       subtitle_client: @subtitle_client,
       subtitle_default: Playback.subtitle_default(),
-      subtitle_fallback: Playback.subtitle_fallback()
+      subtitle_fallback: Playback.subtitle_fallback(),
+      subtitle_translate: Playback.subtitle_translate()
     }
   end
 
@@ -399,6 +433,7 @@ defmodule Mix.Tasks.Playmark.Debug do
       subtitles?: Playback.subtitles?(),
       subtitle_default: Playback.subtitle_default(),
       subtitle_fallback: Playback.subtitle_fallback(),
+      subtitle_translate: Playback.subtitle_translate(),
       player_client: @player_client,
       subtitle_client: @subtitle_client,
       title: "<video-title>",
