@@ -15,6 +15,7 @@ defmodule Playmark.TUI.Actions do
   alias ExRatatui.Event
 
   alias Playmark.TUI.{
+    AddActions,
     Filter,
     HelpActions,
     HistoryActions,
@@ -480,7 +481,7 @@ defmodule Playmark.TUI.Actions do
 
       {:noreply, %{state | status: {:error, message}}}
     else
-      {:noreply, start_add(value, state)}
+      {:noreply, AddActions.start_add(value, state)}
     end
   end
 
@@ -613,7 +614,7 @@ defmodule Playmark.TUI.Actions do
   defp bookmark_explore_selected(state) do
     case selected_explore_video(state) do
       nil -> state
-      video -> bookmark_video(video, state)
+      video -> AddActions.bookmark_video(video, state)
     end
   end
 
@@ -790,7 +791,7 @@ defmodule Playmark.TUI.Actions do
   defp bookmark_search_selected(state) do
     case selected_search_video(state) do
       nil -> state
-      video -> bookmark_video(video, state)
+      video -> AddActions.bookmark_video(video, state)
     end
   end
 
@@ -1294,102 +1295,13 @@ defmodule Playmark.TUI.Actions do
         state
 
       video ->
-        bookmark_video(video, state)
+        AddActions.bookmark_video(video, state)
     end
   end
 
-  defp bookmark_video(video, state) do
-    parent = self()
-
-    Task.start(fn ->
-      result =
-        try do
-          Bookmarks.add_bookmark(video.url)
-        rescue
-          error -> {:error, Exception.message(error)}
-        end
-
-      send(parent, {:bookmark_video_result, result})
-    end)
-
-    %{state | status: {:info, "Bookmarking #{video.title}…"}}
-  end
-
-  # --- adding a bookmark, subscription, playlist, or local -----------------
-
-  # Add a bookmark, subscription, playlist, or local depending on the active view,
-  # off the runtime process. The task always sends a result, even on an
-  # unexpected raise, so we never get stuck in :fetching.
-  defp start_add(url, %{view: :bookmarks} = state) do
-    parent = self()
-
-    Task.start(fn ->
-      result =
-        try do
-          Bookmarks.add_bookmark(url)
-        rescue
-          error -> {:error, Exception.message(error)}
-        end
-
-      send(parent, {:add_result, result})
-    end)
-
-    %{state | mode: :fetching, status: {:info, "Fetching metadata… (Esc to cancel)"}}
-  end
-
-  defp start_add(url, %{view: :subscriptions} = state) do
-    parent = self()
-    subscriptions = Impl.subscriptions()
-
-    Task.start(fn ->
-      result =
-        try do
-          subscriptions.add_subscription(url)
-        rescue
-          error -> {:error, Exception.message(error)}
-        end
-
-      send(parent, {:add_result, result, :subscription})
-    end)
-
-    %{state | mode: :fetching, status: {:info, "Adding channel… (Esc to cancel)"}}
-  end
-
-  defp start_add(url, %{view: :playlists} = state) do
-    parent = self()
-    playlists = Impl.playlists()
-
-    Task.start(fn ->
-      result =
-        try do
-          playlists.add_playlist(url)
-        rescue
-          error -> {:error, Exception.message(error)}
-        end
-
-      send(parent, {:add_result, result, :playlist})
-    end)
-
-    %{state | mode: :fetching, status: {:info, "Adding playlist… (Esc to cancel)"}}
-  end
-
-  defp start_add(path, %{view: :locals} = state) do
-    parent = self()
-    locals = Impl.locals()
-
-    Task.start(fn ->
-      result =
-        try do
-          locals.add_local(path)
-        rescue
-          error -> {:error, Exception.message(error)}
-        end
-
-      send(parent, {:add_result, result, :local})
-    end)
-
-    %{state | mode: :fetching, status: {:info, "Registering directory… (Esc to cancel)"}}
-  end
+  # bookmark_video/2 and the four start_add/2 clauses moved to
+  # Playmark.TUI.AddActions. Both were private, so there is nothing to delegate;
+  # bookmark_selected_video/1 above stays here because it reads the browse cursor.
 
   # --- helpers -------------------------------------------------------------
 
