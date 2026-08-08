@@ -14,7 +14,7 @@ defmodule Playmark.TUI.Actions do
 
   alias ExRatatui.Event
 
-  alias Playmark.TUI.Filter
+  alias Playmark.TUI.{Filter, Nav}
 
   alias Playmark.{
     Bookmarks,
@@ -35,11 +35,6 @@ defmodule Playmark.TUI.Actions do
   @minimum_resume_ms 10_000
   @completion_window_ms 30_000
 
-  # How many rows PageUp/PageDown move. There is no terminal-height value in TUI
-  # state (lists render through an auto-scrolling Table), so paging uses a fixed
-  # step rather than a real screenful; clamp/3 bounds the ends.
-  @page_step 10
-
   # --- list mode -----------------------------------------------------------
 
   def handle_list_key("q", state), do: {:stop, state}
@@ -51,8 +46,8 @@ defmodule Playmark.TUI.Actions do
   def handle_list_key("home", state), do: {:noreply, move(state, :top)}
   def handle_list_key("G", state), do: {:noreply, move(state, :bottom)}
   def handle_list_key("end", state), do: {:noreply, move(state, :bottom)}
-  def handle_list_key("page_up", state), do: {:noreply, move(state, -@page_step)}
-  def handle_list_key("page_down", state), do: {:noreply, move(state, @page_step)}
+  def handle_list_key("page_up", state), do: {:noreply, move(state, -Nav.page_step())}
+  def handle_list_key("page_down", state), do: {:noreply, move(state, Nav.page_step())}
   def handle_list_key("tab", state), do: {:noreply, toggle_view(state)}
   def handle_list_key("/", state), do: {:noreply, open_filter(state)}
   def handle_list_key("a", state), do: {:noreply, start_input(state)}
@@ -213,7 +208,7 @@ defmodule Playmark.TUI.Actions do
             %{
               state
               | bookmarks: bookmarks,
-                selected: clamp_index(state.selected, bookmarks),
+                selected: Nav.clamp_index(state.selected, bookmarks),
                 status: {:info, "Deleted"}
             }
 
@@ -224,7 +219,7 @@ defmodule Playmark.TUI.Actions do
             %{
               state
               | subscriptions: subscriptions,
-                selected: clamp_index(state.selected, subscriptions),
+                selected: Nav.clamp_index(state.selected, subscriptions),
                 status: {:info, "Unsubscribed"}
             }
 
@@ -235,7 +230,7 @@ defmodule Playmark.TUI.Actions do
             %{
               state
               | playlists: playlists,
-                selected: clamp_index(state.selected, playlists),
+                selected: Nav.clamp_index(state.selected, playlists),
                 status: {:info, "Removed"}
             }
 
@@ -246,7 +241,7 @@ defmodule Playmark.TUI.Actions do
             %{
               state
               | locals: locals,
-                selected: clamp_index(state.selected, locals),
+                selected: Nav.clamp_index(state.selected, locals),
                 status: {:info, "Removed"}
             }
         end
@@ -264,8 +259,8 @@ defmodule Playmark.TUI.Actions do
   def handle_videos_key("home", state), do: {:noreply, move(state, :top)}
   def handle_videos_key("G", state), do: {:noreply, move(state, :bottom)}
   def handle_videos_key("end", state), do: {:noreply, move(state, :bottom)}
-  def handle_videos_key("page_up", state), do: {:noreply, move(state, -@page_step)}
-  def handle_videos_key("page_down", state), do: {:noreply, move(state, @page_step)}
+  def handle_videos_key("page_up", state), do: {:noreply, move(state, -Nav.page_step())}
+  def handle_videos_key("page_down", state), do: {:noreply, move(state, Nav.page_step())}
 
   def handle_videos_key("enter", %{view: :locals} = state),
     do: {:noreply, activate_local_entry(state)}
@@ -388,10 +383,10 @@ defmodule Playmark.TUI.Actions do
     do: {:noreply, move_channel_playlist(state, :bottom)}
 
   def handle_channel_playlists_key("page_up", state),
-    do: {:noreply, move_channel_playlist(state, -@page_step)}
+    do: {:noreply, move_channel_playlist(state, -Nav.page_step())}
 
   def handle_channel_playlists_key("page_down", state),
-    do: {:noreply, move_channel_playlist(state, @page_step)}
+    do: {:noreply, move_channel_playlist(state, Nav.page_step())}
 
   def handle_channel_playlists_key("enter", state),
     do: {:noreply, load_channel_playlist_videos(state)}
@@ -433,7 +428,7 @@ defmodule Playmark.TUI.Actions do
   end
 
   defp move_channel_playlist(state, target) when target in [:top, :bottom] do
-    case jump_index(Filter.visible_channel_playlists(state), target) do
+    case Nav.jump_index(Filter.visible_channel_playlists(state), target) do
       nil -> state
       index -> %{state | channel_playlist_selected: index}
     end
@@ -450,7 +445,7 @@ defmodule Playmark.TUI.Actions do
         %{
           state
           | channel_playlist_selected:
-              clamp(state.channel_playlist_selected + delta, 0, length(playlists) - 1)
+              Nav.clamp(state.channel_playlist_selected + delta, 0, length(playlists) - 1)
         }
     end
   end
@@ -461,7 +456,7 @@ defmodule Playmark.TUI.Actions do
     %{
       state
       | channel_playlist_selected:
-          clamp(state.channel_playlist_selected, 0, max(length(playlists) - 1, 0))
+          Nav.clamp(state.channel_playlist_selected, 0, max(length(playlists) - 1, 0))
     }
   end
 
@@ -495,7 +490,7 @@ defmodule Playmark.TUI.Actions do
 
   # Keep `selected` within the filtered list after the term changes.
   defp reclamp_filtered(state) do
-    %{state | selected: clamp(state.selected, 0, max(length(current_list(state)) - 1, 0))}
+    %{state | selected: Nav.clamp(state.selected, 0, max(length(current_list(state)) - 1, 0))}
   end
 
   # --- input mode ----------------------------------------------------------
@@ -526,14 +521,8 @@ defmodule Playmark.TUI.Actions do
 
   # --- navigation ----------------------------------------------------------
 
-  # The absolute index for a jump-to-edge (`:top`/`:bottom`), or nil for an empty
-  # list. Shared by every mover so g/G/Home/End behave uniformly.
-  defp jump_index([], _target), do: nil
-  defp jump_index(_list, :top), do: 0
-  defp jump_index(list, :bottom), do: length(list) - 1
-
   defp move(state, target) when target in [:top, :bottom] do
-    case jump_index(current_list(state), target) do
+    case Nav.jump_index(current_list(state), target) do
       nil -> state
       index -> %{state | selected: index}
     end
@@ -544,7 +533,7 @@ defmodule Playmark.TUI.Actions do
 
     case list do
       [] -> state
-      _ -> %{state | selected: clamp(state.selected + delta, 0, length(list) - 1)}
+      _ -> %{state | selected: Nav.clamp(state.selected + delta, 0, length(list) - 1)}
     end
   end
 
@@ -558,14 +547,6 @@ defmodule Playmark.TUI.Actions do
 
   defp selected_item(state) do
     Enum.at(current_list(state), state.selected)
-  end
-
-  # The channel name for an item, fed to the player as artist metadata. Its key
-  # differs by source: a bookmark stores `:channel`, an enriched channel/search
-  # video carries `:author`, and a local file has neither. `nil` when absent — the
-  # player then sets no artist flag.
-  defp item_author(item) do
-    Map.get(item, :author) || Map.get(item, :channel)
   end
 
   # --- Explore -------------------------------------------------------------
@@ -622,8 +603,8 @@ defmodule Playmark.TUI.Actions do
   def handle_explore_key("home", state), do: {:noreply, move_explore(state, :top)}
   def handle_explore_key("G", state), do: {:noreply, move_explore(state, :bottom)}
   def handle_explore_key("end", state), do: {:noreply, move_explore(state, :bottom)}
-  def handle_explore_key("page_up", state), do: {:noreply, move_explore(state, -@page_step)}
-  def handle_explore_key("page_down", state), do: {:noreply, move_explore(state, @page_step)}
+  def handle_explore_key("page_up", state), do: {:noreply, move_explore(state, -Nav.page_step())}
+  def handle_explore_key("page_down", state), do: {:noreply, move_explore(state, Nav.page_step())}
   def handle_explore_key("enter", state), do: {:noreply, play_explore_selected(state)}
   def handle_explore_key("b", state), do: {:noreply, bookmark_explore_selected(state)}
   def handle_explore_key("e", state), do: {:noreply, enqueue_explore_selected(state, :tail)}
@@ -638,11 +619,11 @@ defmodule Playmark.TUI.Actions do
   defp move_explore(%{explore_videos: []} = state, _delta), do: state
 
   defp move_explore(state, target) when target in [:top, :bottom] do
-    %{state | explore_selected: jump_index(state.explore_videos, target)}
+    %{state | explore_selected: Nav.jump_index(state.explore_videos, target)}
   end
 
   defp move_explore(state, delta) do
-    selected = clamp(state.explore_selected + delta, 0, length(state.explore_videos) - 1)
+    selected = Nav.clamp(state.explore_selected + delta, 0, length(state.explore_videos) - 1)
     %{state | explore_selected: selected}
   end
 
@@ -653,7 +634,7 @@ defmodule Playmark.TUI.Actions do
   defp play_explore_selected(state) do
     case selected_explore_video(state) do
       nil -> state
-      video -> start_play(playable_video(video), :explore, state)
+      video -> start_play(Nav.playable_video(video), :explore, state)
     end
   end
 
@@ -667,12 +648,8 @@ defmodule Playmark.TUI.Actions do
   defp enqueue_explore_selected(state, target) do
     case selected_explore_video(state) do
       nil -> state
-      video -> do_enqueue(state, playable_video(video), video.title, target)
+      video -> do_enqueue(state, Nav.playable_video(video), video.title, target)
     end
-  end
-
-  defp playable_video(video) do
-    %{title: video.title, url: video.url, local: false, author: item_author(video)}
   end
 
   # --- Search --------------------------------------------------------------
@@ -757,8 +734,8 @@ defmodule Playmark.TUI.Actions do
   def handle_search_key("home", state), do: {:noreply, move_search(state, :top)}
   def handle_search_key("G", state), do: {:noreply, move_search(state, :bottom)}
   def handle_search_key("end", state), do: {:noreply, move_search(state, :bottom)}
-  def handle_search_key("page_up", state), do: {:noreply, move_search(state, -@page_step)}
-  def handle_search_key("page_down", state), do: {:noreply, move_search(state, @page_step)}
+  def handle_search_key("page_up", state), do: {:noreply, move_search(state, -Nav.page_step())}
+  def handle_search_key("page_down", state), do: {:noreply, move_search(state, Nav.page_step())}
   def handle_search_key("enter", state), do: {:noreply, play_search_selected(state)}
   def handle_search_key("b", state), do: {:noreply, bookmark_search_selected(state)}
   def handle_search_key("e", state), do: {:noreply, enqueue_search_selected(state, :tail)}
@@ -804,7 +781,7 @@ defmodule Playmark.TUI.Actions do
   end
 
   defp move_search(state, target) when target in [:top, :bottom] do
-    case jump_index(Filter.visible_search(state), target) do
+    case Nav.jump_index(Filter.visible_search(state), target) do
       nil -> state
       index -> %{state | search_selected: index}
     end
@@ -816,13 +793,16 @@ defmodule Playmark.TUI.Actions do
         state
 
       videos ->
-        %{state | search_selected: clamp(state.search_selected + delta, 0, length(videos) - 1)}
+        %{
+          state
+          | search_selected: Nav.clamp(state.search_selected + delta, 0, length(videos) - 1)
+        }
     end
   end
 
   defp reclamp_search(state) do
     visible = Filter.visible_search(state)
-    %{state | search_selected: clamp(state.search_selected, 0, max(length(visible) - 1, 0))}
+    %{state | search_selected: Nav.clamp(state.search_selected, 0, max(length(visible) - 1, 0))}
   end
 
   defp selected_search_video(state),
@@ -831,7 +811,7 @@ defmodule Playmark.TUI.Actions do
   defp play_search_selected(state) do
     case selected_search_video(state) do
       nil -> state
-      video -> start_play(playable_video(video), :search, state)
+      video -> start_play(Nav.playable_video(video), :search, state)
     end
   end
 
@@ -845,7 +825,7 @@ defmodule Playmark.TUI.Actions do
   defp enqueue_search_selected(state, target) do
     case selected_search_video(state) do
       nil -> state
-      video -> do_enqueue(state, playable_video(video), video.title, target)
+      video -> do_enqueue(state, Nav.playable_video(video), video.title, target)
     end
   end
 
@@ -877,7 +857,7 @@ defmodule Playmark.TUI.Actions do
           title: item.title,
           url: item.url,
           local: state.view == :locals,
-          author: item_author(item)
+          author: Nav.item_author(item)
         }
 
         do_enqueue(state, attrs, item.title, target)
@@ -915,7 +895,7 @@ defmodule Playmark.TUI.Actions do
       | mode: :queue_manage,
         queue_return: state.mode,
         queue: Queue.list_items(),
-        queue_selected: clamp(state.queue_selected, 0, max(length(state.queue) - 1, 0))
+        queue_selected: Nav.clamp(state.queue_selected, 0, max(length(state.queue) - 1, 0))
     }
   end
 
@@ -928,8 +908,8 @@ defmodule Playmark.TUI.Actions do
   def handle_queue_key("home", state), do: {:noreply, move_queue(state, :top)}
   def handle_queue_key("G", state), do: {:noreply, move_queue(state, :bottom)}
   def handle_queue_key("end", state), do: {:noreply, move_queue(state, :bottom)}
-  def handle_queue_key("page_up", state), do: {:noreply, move_queue(state, -@page_step)}
-  def handle_queue_key("page_down", state), do: {:noreply, move_queue(state, @page_step)}
+  def handle_queue_key("page_up", state), do: {:noreply, move_queue(state, -Nav.page_step())}
+  def handle_queue_key("page_down", state), do: {:noreply, move_queue(state, Nav.page_step())}
   def handle_queue_key("d", state), do: {:noreply, confirm_remove_queued(state)}
   def handle_queue_key("[", state), do: {:noreply, reorder_queued(state, :up)}
   def handle_queue_key("]", state), do: {:noreply, reorder_queued(state, :down)}
@@ -944,7 +924,7 @@ defmodule Playmark.TUI.Actions do
   def handle_queue_key(_code, state), do: {:noreply, state}
 
   defp move_queue(state, target) when target in [:top, :bottom] do
-    case jump_index(state.queue, target) do
+    case Nav.jump_index(state.queue, target) do
       nil -> state
       index -> %{state | queue_selected: index}
     end
@@ -956,7 +936,7 @@ defmodule Playmark.TUI.Actions do
         state
 
       queue ->
-        %{state | queue_selected: clamp(state.queue_selected + delta, 0, length(queue) - 1)}
+        %{state | queue_selected: Nav.clamp(state.queue_selected + delta, 0, length(queue) - 1)}
     end
   end
 
@@ -994,7 +974,7 @@ defmodule Playmark.TUI.Actions do
         %{
           state
           | queue: queue,
-            queue_selected: clamp(state.queue_selected, 0, max(length(queue) - 1, 0)),
+            queue_selected: Nav.clamp(state.queue_selected, 0, max(length(queue) - 1, 0)),
             status: {:info, "Removed from queue"}
         }
     end
@@ -1075,7 +1055,7 @@ defmodule Playmark.TUI.Actions do
       | mode: :history,
         history_return: state.mode,
         history: history,
-        history_selected: clamp(state.history_selected, 0, max(length(history) - 1, 0))
+        history_selected: Nav.clamp(state.history_selected, 0, max(length(history) - 1, 0))
     }
   end
 
@@ -1088,8 +1068,8 @@ defmodule Playmark.TUI.Actions do
   def handle_history_key("home", state), do: {:noreply, move_history(state, :top)}
   def handle_history_key("G", state), do: {:noreply, move_history(state, :bottom)}
   def handle_history_key("end", state), do: {:noreply, move_history(state, :bottom)}
-  def handle_history_key("page_up", state), do: {:noreply, move_history(state, -@page_step)}
-  def handle_history_key("page_down", state), do: {:noreply, move_history(state, @page_step)}
+  def handle_history_key("page_up", state), do: {:noreply, move_history(state, -Nav.page_step())}
+  def handle_history_key("page_down", state), do: {:noreply, move_history(state, Nav.page_step())}
   def handle_history_key("d", state), do: {:noreply, confirm_remove_history(state)}
   def handle_history_key("c", state), do: {:noreply, confirm_clear_history(state)}
   def handle_history_key("enter", state), do: {:noreply, replay_selected(state)}
@@ -1107,7 +1087,7 @@ defmodule Playmark.TUI.Actions do
   def handle_history_key(_code, state), do: {:noreply, state}
 
   defp move_history(state, target) when target in [:top, :bottom] do
-    case jump_index(state.history, target) do
+    case Nav.jump_index(state.history, target) do
       nil -> state
       index -> %{state | history_selected: index}
     end
@@ -1119,7 +1099,10 @@ defmodule Playmark.TUI.Actions do
         state
 
       history ->
-        %{state | history_selected: clamp(state.history_selected + delta, 0, length(history) - 1)}
+        %{
+          state
+          | history_selected: Nav.clamp(state.history_selected + delta, 0, length(history) - 1)
+        }
     end
   end
 
@@ -1156,7 +1139,7 @@ defmodule Playmark.TUI.Actions do
         %{
           state
           | history: history,
-            history_selected: clamp(state.history_selected, 0, max(length(history) - 1, 0)),
+            history_selected: Nav.clamp(state.history_selected, 0, max(length(history) - 1, 0)),
             status: {:info, "Removed from history"}
         }
     end
@@ -1252,7 +1235,7 @@ defmodule Playmark.TUI.Actions do
           title: item.title,
           url: item.url,
           local: state.view == :locals,
-          author: item_author(item)
+          author: Nav.item_author(item)
         }
 
         start_play(playable, :list, state)
@@ -1964,12 +1947,6 @@ defmodule Playmark.TUI.Actions do
   # Where a canceled :fetching/:loading returns to.
   def back_mode(%{mode: :fetching}), do: :list
   def back_mode(state), do: Map.get(state, :loading_return, :list)
-
-  defp clamp_index(index, list), do: clamp(index, 0, max(length(list) - 1, 0))
-
-  defp clamp(n, lo, _hi) when n < lo, do: lo
-  defp clamp(n, _lo, hi) when n > hi, do: hi
-  defp clamp(n, _lo, _hi), do: n
 
   defp clear_local_browser(state) do
     Map.merge(state, %{
