@@ -1,7 +1,7 @@
-defmodule Playmark.PlaylistTest do
+defmodule Playmark.Playlists.PlaylistTest do
   use ExUnit.Case, async: true
 
-  alias Playmark.Playlist
+  alias Playmark.Playlists.Playlist
 
   describe "changeset/2" do
     test "accepts URL, title, and channel" do

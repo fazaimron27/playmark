@@ -1,7 +1,7 @@
-defmodule Playmark.LocalTest do
+defmodule Playmark.Locals.LocalTest do
   use ExUnit.Case, async: true
 
-  alias Playmark.Local
+  alias Playmark.Locals.Local
 
   describe "changeset/2" do
     test "accepts a path and name" do

@@ -1,7 +1,7 @@
-defmodule Playmark.SubscriptionTest do
+defmodule Playmark.Subscriptions.SubscriptionTest do
   use ExUnit.Case, async: true
 
-  alias Playmark.Subscription
+  alias Playmark.Subscriptions.Subscription
 
   describe "changeset/2" do
     test "is valid with url and name" do

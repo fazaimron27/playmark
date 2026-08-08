@@ -1,7 +1,7 @@
 defmodule Playmark.TUI.NavTest do
   use ExUnit.Case, async: true
 
-  alias Playmark.Bookmark
+  alias Playmark.Bookmarks.Bookmark
   alias Playmark.TUI.Nav
 
   describe "jump_index/2" do

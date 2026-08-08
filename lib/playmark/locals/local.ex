@@ -1,4 +1,4 @@
-defmodule Playmark.Local do
+defmodule Playmark.Locals.Local do
   use Ecto.Schema
   import Ecto.Changeset
 

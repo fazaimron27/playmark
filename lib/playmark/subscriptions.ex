@@ -10,7 +10,8 @@ defmodule Playmark.Subscriptions do
   import Ecto.Query, only: [from: 2]
 
   alias Playmark.Source.Channel
-  alias Playmark.{Repo, Subscription, YouTube}
+  alias Playmark.Subscriptions.Subscription
+  alias Playmark.{Repo, YouTube}
 
   @doc """
   Lists all subscriptions by channel name in ascending order.

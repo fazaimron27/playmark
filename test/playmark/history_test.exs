@@ -23,8 +23,8 @@ defmodule Playmark.HistoryTest do
       later = DateTime.add(first.played_at, 60, :second)
 
       {:ok, second} =
-        %Playmark.HistoryItem{}
-        |> Playmark.HistoryItem.changeset(%{
+        %Playmark.History.Item{}
+        |> Playmark.History.Item.changeset(%{
           "title" => "New",
           "url" => "https://y/1",
           "author" => "New Chan",
@@ -154,7 +154,7 @@ defmodule Playmark.HistoryTest do
       assert updated.played_at == played_at
 
       assert :ok = History.clear_checkpoint(item.url)
-      assert Playmark.Repo.get!(Playmark.HistoryItem, item.id).played_at == played_at
+      assert Playmark.Repo.get!(Playmark.History.Item, item.id).played_at == played_at
     end
   end
 

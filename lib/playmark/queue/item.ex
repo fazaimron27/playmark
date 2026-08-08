@@ -1,4 +1,4 @@
-defmodule Playmark.QueueItem do
+defmodule Playmark.Queue.Item do
   use Ecto.Schema
   import Ecto.Changeset
 

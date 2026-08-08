@@ -1,4 +1,4 @@
-defmodule Playmark.Subscription do
+defmodule Playmark.Subscriptions.Subscription do
   use Ecto.Schema
   import Ecto.Changeset
 

@@ -20,13 +20,14 @@ defmodule Playmark.History do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{HistoryItem, Repo}
+  alias Playmark.History.Item
+  alias Playmark.Repo
 
   @doc """
   Lists all history items, most recently played first.
   """
   def list_items do
-    Repo.all(from(h in HistoryItem, order_by: [desc: h.played_at]))
+    Repo.all(from(h in Item, order_by: [desc: h.played_at]))
   end
 
   @doc """
@@ -36,7 +37,7 @@ defmodule Playmark.History do
   """
   def get_checkpoint(url) when is_binary(url) do
     Repo.one(
-      from(h in HistoryItem,
+      from(h in Item,
         where:
           h.url == ^url and not is_nil(h.resume_position_ms) and
             h.resume_position_ms >= 0 and not is_nil(h.duration_ms) and h.duration_ms >= 0,
@@ -56,13 +57,13 @@ defmodule Playmark.History do
   `{:error, changeset}`, or `{:error, :not_found}`.
   """
   def save_checkpoint(url, resume_position_ms, duration_ms) when is_binary(url) do
-    case Repo.get_by(HistoryItem, url: url) do
+    case Repo.get_by(Item, url: url) do
       nil ->
         {:error, :not_found}
 
       item ->
         item
-        |> HistoryItem.changeset(%{
+        |> Item.changeset(%{
           resume_position_ms: resume_position_ms,
           duration_ms: duration_ms
         })
@@ -77,7 +78,7 @@ defmodule Playmark.History do
   This is a no-op when the URL is not in history and does not change `played_at`.
   """
   def clear_checkpoint(url) when is_binary(url) do
-    from(h in HistoryItem, where: h.url == ^url)
+    from(h in Item, where: h.url == ^url)
     |> Repo.update_all(set: [resume_position_ms: nil, duration_ms: nil])
 
     :ok
@@ -100,8 +101,8 @@ defmodule Playmark.History do
       |> Map.new(fn {k, v} -> {to_string(k), v} end)
       |> Map.put("played_at", now)
 
-    %HistoryItem{}
-    |> HistoryItem.changeset(attrs)
+    %Item{}
+    |> Item.changeset(attrs)
     |> Repo.insert(
       on_conflict: {:replace, [:title, :author, :played_at, :updated_at]},
       conflict_target: :url
@@ -111,7 +112,7 @@ defmodule Playmark.History do
   @doc """
   Removes one item from the history.
   """
-  def remove(%HistoryItem{} = item) do
+  def remove(%Item{} = item) do
     Repo.delete(item)
   end
 
@@ -119,7 +120,7 @@ defmodule Playmark.History do
   Empties the history.
   """
   def clear do
-    Repo.delete_all(HistoryItem)
+    Repo.delete_all(Item)
     :ok
   end
 end

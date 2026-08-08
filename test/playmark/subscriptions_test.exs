@@ -1,7 +1,8 @@
 defmodule Playmark.SubscriptionsTest do
   use Playmark.DataCase, async: false
 
-  alias Playmark.{Subscription, Subscriptions}
+  alias Playmark.Subscriptions
+  alias Playmark.Subscriptions.Subscription
 
   describe "list_subscriptions/0" do
     test "returns subscriptions by channel name ascending, regardless of insertion date" do

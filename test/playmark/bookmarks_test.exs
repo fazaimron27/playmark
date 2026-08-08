@@ -1,7 +1,8 @@
 defmodule Playmark.BookmarksTest do
   use Playmark.DataCase, async: false
 
-  alias Playmark.{Bookmark, Bookmarks}
+  alias Playmark.Bookmarks
+  alias Playmark.Bookmarks.Bookmark
 
   describe "list_bookmarks/0" do
     test "returns bookmarks newest first" do

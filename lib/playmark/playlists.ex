@@ -8,8 +8,9 @@ defmodule Playmark.Playlists do
 
   import Ecto.Query, only: [from: 2]
 
+  alias Playmark.Playlists.Playlist
   alias Playmark.Source.YouTubePlaylist
-  alias Playmark.{Playlist, Repo, YouTube}
+  alias Playmark.{Repo, YouTube}
 
   @doc "Lists saved YouTube playlists, newest first."
   def list_playlists do

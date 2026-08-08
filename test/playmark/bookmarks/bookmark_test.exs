@@ -1,7 +1,7 @@
-defmodule Playmark.BookmarkTest do
+defmodule Playmark.Bookmarks.BookmarkTest do
   use ExUnit.Case, async: true
 
-  alias Playmark.Bookmark
+  alias Playmark.Bookmarks.Bookmark
 
   describe "changeset/2" do
     test "is valid with url, title, and channel" do

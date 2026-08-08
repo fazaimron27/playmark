@@ -2,7 +2,10 @@ defmodule Playmark.TUI.FilterTest do
   use ExUnit.Case, async: true
 
   alias Playmark.TUI.Filter
-  alias Playmark.{Bookmark, Local, Playlist, Subscription}
+  alias Playmark.Bookmarks.Bookmark
+  alias Playmark.Locals.Local
+  alias Playmark.Playlists.Playlist
+  alias Playmark.Subscriptions.Subscription
 
   describe "matches?/3" do
     test "empty term matches everything" do

@@ -1,4 +1,4 @@
-defmodule Playmark.HistoryItem do
+defmodule Playmark.History.Item do
   use Ecto.Schema
   import Ecto.Changeset
 

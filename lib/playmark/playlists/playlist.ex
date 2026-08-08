@@ -1,4 +1,4 @@
-defmodule Playmark.Playlist do
+defmodule Playmark.Playlists.Playlist do
   use Ecto.Schema
   import Ecto.Changeset
 

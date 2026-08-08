@@ -1,4 +1,4 @@
-defmodule Playmark.Bookmark do
+defmodule Playmark.Bookmarks.Bookmark do
   use Ecto.Schema
   import Ecto.Changeset
 

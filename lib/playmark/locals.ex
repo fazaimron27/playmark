@@ -8,7 +8,8 @@ defmodule Playmark.Locals do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{Local, Repo}
+  alias Playmark.Locals.Local
+  alias Playmark.Repo
 
   @doc "Lists all registered local directories, newest first."
   def list_locals do
