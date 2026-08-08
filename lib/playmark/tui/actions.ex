@@ -14,23 +14,12 @@ defmodule Playmark.TUI.Actions do
 
   alias ExRatatui.Event
 
-  alias Playmark.TUI.{Filter, Nav}
+  alias Playmark.TUI.{Filter, Impl, Nav}
 
-  alias Playmark.{
-    Bookmarks,
-    Channel,
-    Explore,
-    History,
-    LocalFiles,
-    Locals,
-    Playback,
-    Playlists,
-    Queue,
-    Search,
-    Subscriptions,
-    YouTube,
-    YouTubePlaylist
-  }
+  # Called directly, not through `Impl`: the delete paths below, the queue, URL
+  # canonicalization, and `Playback`'s config reads (see `Impl`'s moduledoc on
+  # why those must not go through the seam).
+  alias Playmark.{Bookmarks, Locals, Playback, Playlists, Queue, Subscriptions, YouTube}
 
   @minimum_resume_ms 10_000
   @completion_window_ms 30_000
@@ -153,7 +142,7 @@ defmodule Playmark.TUI.Actions do
   end
 
   def handle_resume_key("n", %{resume: pending} = state) when is_map(pending) do
-    safe_history(fn -> history().clear_checkpoint(pending.playable.url) end)
+    safe_history(fn -> Impl.history().clear_checkpoint(pending.playable.url) end)
     {:noreply, launch_pending_resume(state, nil)}
   end
 
@@ -554,7 +543,7 @@ defmodule Playmark.TUI.Actions do
   def open_explore(state) do
     parent = self()
     request_ref = make_ref()
-    impl = explore()
+    impl = Impl.explore()
 
     {:ok, task_pid} =
       Task.start(fn ->
@@ -693,7 +682,7 @@ defmodule Playmark.TUI.Actions do
   defp start_search(query, state) do
     parent = self()
     request_ref = make_ref()
-    impl = search()
+    impl = Impl.search()
 
     {:ok, task_pid} =
       Task.start(fn ->
@@ -1133,7 +1122,7 @@ defmodule Playmark.TUI.Actions do
         state
 
       item ->
-        {:ok, _} = history().remove(item)
+        {:ok, _} = Impl.history().remove(item)
         history = list_history()
 
         %{
@@ -1168,7 +1157,7 @@ defmodule Playmark.TUI.Actions do
   end
 
   defp clear_history(state) do
-    :ok = history().clear()
+    :ok = Impl.history().clear()
     %{state | history: [], history_selected: 0, status: {:info, "History cleared"}}
   end
 
@@ -1247,7 +1236,7 @@ defmodule Playmark.TUI.Actions do
   # prompt so Search, Explore, History, nested video lists, and Queue all restore
   # exactly where the play was requested.
   def start_play(playable, origin, state, queue_id \\ nil) do
-    play = playback()
+    play = Impl.playback()
     return_mode = return_mode(origin, state)
 
     case resume_checkpoint(play, playable.url) do
@@ -1275,7 +1264,7 @@ defmodule Playmark.TUI.Actions do
   # back to handle_info/2.
   defp launch_play(playable, origin, state, queue_id, return_mode, start_position_ms) do
     parent = self()
-    play = playback()
+    play = Impl.playback()
     player = play.player()
     local? = playable.local
     url = playable.url
@@ -1286,7 +1275,7 @@ defmodule Playmark.TUI.Actions do
     # interrupt playback, so we ignore its result. A rewatch upserts (bumps the
     # existing row's played_at) rather than duplicating (see Playmark.History).
     safe_history(fn ->
-      history().record(%{
+      Impl.history().record(%{
         title: playable.title,
         url: url,
         local: local?,
@@ -1301,10 +1290,10 @@ defmodule Playmark.TUI.Actions do
 
     progress = fn
       {:checkpoint, position_ms, duration_ms} ->
-        safe_history(fn -> history().save_checkpoint(url, position_ms, duration_ms) end)
+        safe_history(fn -> Impl.history().save_checkpoint(url, position_ms, duration_ms) end)
 
       :clear_checkpoint ->
-        safe_history(fn -> history().clear_checkpoint(url) end)
+        safe_history(fn -> Impl.history().clear_checkpoint(url) end)
 
       stage ->
         send(parent, {:play_progress, playback_ref, stage})
@@ -1360,7 +1349,7 @@ defmodule Playmark.TUI.Actions do
 
   defp resume_checkpoint(play, url) do
     if play.resume_supported?() do
-      case safe_history(fn -> history().get_checkpoint(url) end) do
+      case safe_history(fn -> Impl.history().get_checkpoint(url) end) do
         %{resume_position_ms: position, duration_ms: duration} = checkpoint
         when is_integer(position) and is_integer(duration) and
                position >= @minimum_resume_ms and duration - position > @completion_window_ms ->
@@ -1468,7 +1457,7 @@ defmodule Playmark.TUI.Actions do
       when is_binary(url) do
     parent = self()
     request_ref = make_ref()
-    chan = channel()
+    chan = Impl.channel()
     name = state.channel_name
 
     {:ok, task_pid} =
@@ -1609,7 +1598,7 @@ defmodule Playmark.TUI.Actions do
 
       playlist ->
         parent = self()
-        impl = playlists()
+        impl = Impl.playlists()
         channel = state.channel_playlist_channel_name
         request_ref = make_ref()
 
@@ -1641,7 +1630,7 @@ defmodule Playmark.TUI.Actions do
   # channel has content on another tab.
   defp fetch_videos_tab(state, url, name, tab) do
     parent = self()
-    chan = channel()
+    chan = Impl.channel()
     request_ref = make_ref()
     label = if tab == :streams, do: "streams", else: "videos"
     fallback_to_streams? = state.mode == :list and tab == :videos
@@ -1705,7 +1694,7 @@ defmodule Playmark.TUI.Actions do
   defp fetch_playlist_videos(state, playlist, return_mode) do
     parent = self()
     request_ref = make_ref()
-    source = youtube_playlist()
+    source = Impl.youtube_playlist()
     title = playlist.title
     url = playlist.url
 
@@ -1808,7 +1797,7 @@ defmodule Playmark.TUI.Actions do
 
   defp fetch_local_entries(state, pending, return_mode) do
     parent = self()
-    local_files = local_files()
+    local_files = Impl.local_files()
     request_ref = make_ref()
 
     {:ok, task_pid} =
@@ -1890,7 +1879,7 @@ defmodule Playmark.TUI.Actions do
 
   defp start_add(url, %{view: :subscriptions} = state) do
     parent = self()
-    subscriptions = subscriptions()
+    subscriptions = Impl.subscriptions()
 
     Task.start(fn ->
       result =
@@ -1908,7 +1897,7 @@ defmodule Playmark.TUI.Actions do
 
   defp start_add(url, %{view: :playlists} = state) do
     parent = self()
-    playlists = playlists()
+    playlists = Impl.playlists()
 
     Task.start(fn ->
       result =
@@ -1926,7 +1915,7 @@ defmodule Playmark.TUI.Actions do
 
   defp start_add(path, %{view: :locals} = state) do
     parent = self()
-    locals = locals()
+    locals = Impl.locals()
 
     Task.start(fn ->
       result =
@@ -1966,23 +1955,7 @@ defmodule Playmark.TUI.Actions do
     "#{count} #{label}"
   end
 
-  # Implementations, overridable in tests so the suite never spawns a real
-  # player or shells out to yt-dlp / the network.
-  defp playback, do: Application.get_env(:playmark, :playback_impl, Playback)
-  defp channel, do: Application.get_env(:playmark, :channel_impl, Channel)
-  defp subscriptions, do: Application.get_env(:playmark, :subscriptions_impl, Subscriptions)
-  defp search, do: Application.get_env(:playmark, :search_impl, Search)
-  defp explore, do: Application.get_env(:playmark, :explore_impl, Explore)
-  defp playlists, do: Application.get_env(:playmark, :playlists_impl, Playlists)
-  defp locals, do: Application.get_env(:playmark, :locals_impl, Locals)
-  defp local_files, do: Application.get_env(:playmark, :local_files_impl, LocalFiles)
-
-  defp youtube_playlist,
-    do: Application.get_env(:playmark, :youtube_playlist_impl, YouTubePlaylist)
-
-  defp history, do: Application.get_env(:playmark, :history_impl, History)
-
   # History list reads go through the impl seam too, so a test stub sees its own
   # recorded plays reflected in the modal.
-  defp list_history, do: history().list_items()
+  defp list_history, do: Impl.history().list_items()
 end
