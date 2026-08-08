@@ -26,6 +26,7 @@ defmodule Playmark.Config do
       subtitles = true          # show captions (default true)
       subtitle_default = en     # first-choice caption language (default en)
       subtitle_fallback = id    # second-choice language (optional, no default)
+      subtitle_translate = true # accept machine-translated captions (default true)
       search_limit = 20         # results per YouTube search
       explore_limit = 20        # cards fetched from YouTube's homepage
       playlist_limit = 100      # videos fetched per playlist open
@@ -53,6 +54,7 @@ defmodule Playmark.Config do
     "subtitles" => {:subtitles, :boolean},
     "subtitle_default" => {:subtitle_default, :string},
     "subtitle_fallback" => {:subtitle_fallback, :string},
+    "subtitle_translate" => {:subtitle_translate, :boolean},
     "search_limit" => {:search_limit, :pos_integer},
     "explore_limit" => {:explore_limit, :pos_integer},
     "playlist_limit" => {:playlist_limit, :pos_integer},

@@ -47,6 +47,7 @@ defmodule Playmark.ConfigTest do
         :subtitles,
         :subtitle_default,
         :subtitle_fallback,
+        :subtitle_translate,
         :search_limit,
         :explore_limit,
         :playlist_limit,
@@ -141,6 +142,13 @@ defmodule Playmark.ConfigTest do
         assert Config.load() == :ok
         assert Application.get_env(:playmark, :subtitle_default) == "id"
         assert Application.get_env(:playmark, :subtitle_fallback) == "en"
+      end)
+    end
+
+    test "reads subtitle_translate as a boolean" do
+      in_tmp_config("subtitle_translate = off\n", fn ->
+        assert Config.load() == :ok
+        assert Application.get_env(:playmark, :subtitle_translate) == false
       end)
     end
 
