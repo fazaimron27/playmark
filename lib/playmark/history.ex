@@ -8,7 +8,8 @@ defmodule Playmark.History do
   item carries a `local` flag (the replay path forks on it, exactly as the queue's
   does) and a `played_at` timestamp.
 
-  History is recorded when playback *begins* (see `Playmark.TUI.Actions.start_play/4`),
+  History is recorded when playback *begins* (see
+  `Playmark.TUI.PlaybackActions.start_play/4`),
   and rewatching a URL *upserts* — `played_at` (and title/author) are refreshed
   rather than a duplicate row added. A unique index on `:url` backs this; it's the
   deliberate opposite of `queue_items`, which allows duplicates. Recording is

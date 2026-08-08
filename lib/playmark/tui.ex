@@ -60,6 +60,13 @@ defmodule Playmark.TUI do
   routes work to two collaborators — `Playmark.TUI.Actions` for state
   transitions (key handling, navigation, task spawning) and `Playmark.TUI.View`
   for rendering.
+
+  `Actions` holds the browse core — the list / videos / channel-playlists /
+  filter / input state machine, which is one machine and not separable. The
+  overlays and the shared plumbing live in sibling modules: `TUI.PlaybackActions`,
+  `TUI.QueueActions`, `TUI.HistoryActions`, `TUI.SearchActions`,
+  `TUI.ExploreActions`, `TUI.HelpActions`, `TUI.AddActions`, plus `TUI.Nav`
+  (cursor math) and `TUI.Impl` (the test seams).
   """
 
   use ExRatatui.App

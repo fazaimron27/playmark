@@ -11,7 +11,7 @@
 ## Execution Model
 
 - `Playmark.Application` loads `~/.config/playmark/config.env`, injects the runtime SQLite path, starts `Repo` and `Cache`, then auto-migrates. `Mix.Tasks.Playmark` performs executable checks and starts `Playmark.TUI`.
-- `Playmark.TUI` owns runtime callbacks, `TUI.Actions` owns transitions/task spawning, and `TUI.View` is pure rendering. Keep network, shell, filesystem, and playback work out of `handle_event/2`: spawn a task and commit its message in `handle_info/2`.
+- `Playmark.TUI` owns runtime callbacks, `TUI.Actions` owns the browse-core transitions/task spawning (with the overlays in sibling `TUI.*Actions` modules, plus `TUI.Nav` and `TUI.Impl`), and `TUI.View` is pure rendering. Keep network, shell, filesystem, and playback work out of `handle_event/2`: spawn a task and commit its message in `handle_info/2`.
 - Search, Explore, local-directory, channel-tab, channel-playlist, and playlist-video requests track both a task PID and request ref. Cancellation kills the task and clears the ref; result handlers must reject stale refs. Older add paths are untracked and discard late messages through mode guards.
 - Search/Explore/Queue/History are overlays that must restore the exact underlying browse mode. Ordinary videos, Search results, and channel playlist containers intentionally keep separate rows, cursors, and filters.
 - Local folders reuse `:videos`; each parent frame preserves path, rows, cursor, and filter. `r` refreshes only the current frame and preserves its filtered selection by entry ID. Directory entries are non-playable and non-queueable, and child directory symlinks are intentionally omitted.
