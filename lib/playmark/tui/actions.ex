@@ -23,7 +23,8 @@ defmodule Playmark.TUI.Actions do
     Impl,
     Nav,
     PlaybackActions,
-    QueueActions
+    QueueActions,
+    SearchActions
   }
 
   # Called directly, not through `Impl`: the delete paths below and URL
@@ -533,190 +534,14 @@ defmodule Playmark.TUI.Actions do
 
   # --- Search --------------------------------------------------------------
 
-  def open_search(state) do
-    ExRatatui.text_input_set_value(state.input, "")
-
-    %{
-      state
-      | mode: :search_input,
-        search_return: state.mode,
-        search_videos: [],
-        search_selected: 0,
-        search_query: "",
-        search_filter: "",
-        search_request_ref: nil,
-        search_task_pid: nil,
-        status: nil
-    }
-  end
-
-  def handle_search_input_key(%Event.Key{code: "esc"}, state) do
-    {:noreply, close_search(state)}
-  end
-
-  def handle_search_input_key(%Event.Key{code: "enter"}, state) do
-    query = state.input |> ExRatatui.text_input_get_value() |> String.trim()
-
-    if query == "" do
-      {:noreply, %{state | status: {:error, "Enter a query first"}}}
-    else
-      {:noreply, start_search(query, state)}
-    end
-  end
-
-  def handle_search_input_key(%Event.Key{code: code}, state) do
-    ExRatatui.text_input_handle_key(state.input, code)
-    {:noreply, state}
-  end
-
-  defp start_search(query, state) do
-    parent = self()
-    request_ref = make_ref()
-    impl = Impl.search()
-
-    {:ok, task_pid} =
-      Task.start(fn ->
-        result =
-          try do
-            impl.search(query)
-          rescue
-            error -> {:error, Exception.message(error)}
-          end
-
-        send(parent, {:search_result, request_ref, result, query})
-      end)
-
-    %{
-      state
-      | mode: :search_loading,
-        search_query: query,
-        search_request_ref: request_ref,
-        search_task_pid: task_pid,
-        status: {:info, "Searching #{query}… (Esc to cancel)"}
-    }
-  end
-
-  def cancel_search(state) do
-    if is_pid(state.search_task_pid) and Process.alive?(state.search_task_pid) do
-      Process.exit(state.search_task_pid, :kill)
-    end
-
-    close_search(%{state | search_request_ref: nil, search_task_pid: nil})
-  end
-
-  def handle_search_key("q", state), do: {:stop, state}
-  def handle_search_key("j", state), do: {:noreply, move_search(state, 1)}
-  def handle_search_key("down", state), do: {:noreply, move_search(state, 1)}
-  def handle_search_key("k", state), do: {:noreply, move_search(state, -1)}
-  def handle_search_key("up", state), do: {:noreply, move_search(state, -1)}
-  def handle_search_key("g", state), do: {:noreply, move_search(state, :top)}
-  def handle_search_key("home", state), do: {:noreply, move_search(state, :top)}
-  def handle_search_key("G", state), do: {:noreply, move_search(state, :bottom)}
-  def handle_search_key("end", state), do: {:noreply, move_search(state, :bottom)}
-  def handle_search_key("page_up", state), do: {:noreply, move_search(state, -Nav.page_step())}
-  def handle_search_key("page_down", state), do: {:noreply, move_search(state, Nav.page_step())}
-  def handle_search_key("enter", state), do: {:noreply, play_search_selected(state)}
-  def handle_search_key("b", state), do: {:noreply, bookmark_search_selected(state)}
-  def handle_search_key("e", state), do: {:noreply, enqueue_search_selected(state, :tail)}
-  def handle_search_key("n", state), do: {:noreply, enqueue_search_selected(state, :next)}
-
-  def handle_search_key("/", state) do
-    ExRatatui.text_input_set_value(state.input, state.search_filter)
-    {:noreply, %{state | mode: :search_filter}}
-  end
-
-  def handle_search_key("S", state) do
-    ExRatatui.text_input_set_value(state.input, "")
-
-    {:noreply,
-     %{
-       state
-       | mode: :search_input,
-         search_videos: [],
-         search_selected: 0,
-         search_query: "",
-         search_filter: "",
-         status: nil
-     }}
-  end
-
-  def handle_search_key("esc", %{search_filter: filter} = state) when filter != "" do
-    {:noreply, %{state | search_filter: "", search_selected: 0}}
-  end
-
-  def handle_search_key("esc", state), do: {:noreply, close_search(state)}
-  def handle_search_key(_code, state), do: {:noreply, state}
-
-  def handle_search_filter_key("enter", state),
-    do: {:noreply, %{state | mode: :search_results}}
-
-  def handle_search_filter_key("esc", state),
-    do: {:noreply, %{state | mode: :search_results}}
-
-  def handle_search_filter_key(code, state) do
-    ExRatatui.text_input_handle_key(state.input, code)
-    filter = ExRatatui.text_input_get_value(state.input)
-    {:noreply, reclamp_search(%{state | search_filter: filter})}
-  end
-
-  defp move_search(state, target) when target in [:top, :bottom] do
-    case Nav.jump_index(Filter.visible_search(state), target) do
-      nil -> state
-      index -> %{state | search_selected: index}
-    end
-  end
-
-  defp move_search(state, delta) do
-    case Filter.visible_search(state) do
-      [] ->
-        state
-
-      videos ->
-        %{
-          state
-          | search_selected: Nav.clamp(state.search_selected + delta, 0, length(videos) - 1)
-        }
-    end
-  end
-
-  defp reclamp_search(state) do
-    visible = Filter.visible_search(state)
-    %{state | search_selected: Nav.clamp(state.search_selected, 0, max(length(visible) - 1, 0))}
-  end
-
-  defp selected_search_video(state),
-    do: Enum.at(Filter.visible_search(state), state.search_selected)
-
-  defp play_search_selected(state) do
-    case selected_search_video(state) do
-      nil -> state
-      video -> PlaybackActions.start_play(Nav.playable_video(video), :search, state)
-    end
-  end
-
-  defp bookmark_search_selected(state) do
-    case selected_search_video(state) do
-      nil -> state
-      video -> AddActions.bookmark_video(video, state)
-    end
-  end
-
-  defp enqueue_search_selected(state, target) do
-    case selected_search_video(state) do
-      nil -> state
-      video -> QueueActions.enqueue(state, Nav.playable_video(video), video.title, target)
-    end
-  end
-
-  defp close_search(state) do
-    %{
-      state
-      | mode: state.search_return,
-        search_request_ref: nil,
-        search_task_pid: nil,
-        status: nil
-    }
-  end
+  # Moved to Playmark.TUI.SearchActions; delegated until the runtime calls it
+  # directly. Search keeps its own cursor and filter term, so nothing stays
+  # behind — but the core keeps `Event` and `Filter` for its own handlers.
+  defdelegate open_search(state), to: SearchActions
+  defdelegate handle_search_input_key(event, state), to: SearchActions
+  defdelegate cancel_search(state), to: SearchActions
+  defdelegate handle_search_key(code, state), to: SearchActions
+  defdelegate handle_search_filter_key(code, state), to: SearchActions
 
   # --- queue ---------------------------------------------------------------
 
