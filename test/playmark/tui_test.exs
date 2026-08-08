@@ -743,7 +743,7 @@ defmodule Playmark.TUITest do
       playing = user_state(pid).playing
       assert playing.player == :ffplay
       assert playing.steps == [:resolving, :playing]
-      assert playing.stream == %{max_height: Playmark.Playback.max_height(), result: nil}
+      assert playing.stream == %{max_height: Playmark.Player.Playback.max_height(), result: nil}
       assert playing.captions == nil
 
       assert_receive {TestPlayback, play_task}, 1_000

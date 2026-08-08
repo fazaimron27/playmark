@@ -29,14 +29,14 @@ defmodule Mix.Tasks.Playmark.Debug do
   but without caption or display-metadata flags. It prefixes each log line with
   seconds-since-launch so you can see what VLC reports at the moment it dies.
 
-  `Playmark.Playback` uses the `web_safari` client; this task is what identified
+  `Playmark.Player.Playback` uses the `web_safari` client; this task is what identified
   it, and stays around for re-diagnosing new failures.
   """
   @shortdoc "Diagnose playback for one URL"
 
   use Mix.Task
 
-  alias Playmark.Playback
+  alias Playmark.Player.Playback
 
   # yt-dlp resolves URLs through a chosen YouTube "player client". Each ships
   # differently-signed URLs; some reject non-matching HTTP clients like VLC.
@@ -53,7 +53,7 @@ defmodule Mix.Tasks.Playmark.Debug do
   # What VLC sends when it opens an HTTP stream.
   @vlc_user_agent "VLC/3.0.23 LibVLC/3.0.23"
 
-  # The clients Playmark.Playback uses; play/subs modes mirror them exactly.
+  # The clients Playmark.Player.Playback uses; play/subs modes mirror them exactly.
   # web_safari resolves fetchable streams but drops captions; default exposes
   # captions but its stream URLs 403 — so the two are separate.
   @player_client "web_safari"
@@ -225,7 +225,7 @@ defmodule Mix.Tasks.Playmark.Debug do
   defp play_mode(url) do
     shell = Mix.shell()
 
-    shell.info("== Resolving stream(s) with web_safari (as Playmark.Playback does) ==")
+    shell.info("== Resolving stream(s) with web_safari (as Playmark.Player.Playback does) ==")
 
     args = [
       "--extractor-args",

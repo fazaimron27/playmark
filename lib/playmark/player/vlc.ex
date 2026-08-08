@@ -31,7 +31,7 @@ defmodule Playmark.Player.Vlc do
   @behaviour Playmark.Player
 
   alias Playmark.Player.{Captions, Control}
-  alias Playmark.Playback
+  alias Playmark.Player.Playback
 
   # Bounds each yt-dlp socket read/connect so a black-holed network can't hang
   # stream resolution forever (matching Playmark.Source.Channel). On timeout yt-dlp

@@ -7,7 +7,7 @@ defmodule Playmark.Queue do
   which store only a source handle and fetch contents live -- the queue *is*
   user-curated content, so it's stored outright, ordering included. Each item
   carries a `local` flag because the play path forks on it: local files go
-  straight to the player (`Playmark.Playback.play_local/2`), everything else is a
+  straight to the player (`Playmark.Player.Playback.play_local/2`), everything else is a
   YouTube URL that may need stream resolution (`play/2`). The active view can't
   decide this once a queue mixes sources, so the item must.
 

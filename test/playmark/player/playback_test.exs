@@ -1,8 +1,8 @@
-defmodule Playmark.PlaybackTest do
+defmodule Playmark.Player.PlaybackTest do
   # Not async: several tests mutate the :playmark/:player application env.
   use ExUnit.Case, async: false
 
-  alias Playmark.Playback
+  alias Playmark.Player.Playback
 
   describe "player/0 and executable/1" do
     test "falls back to mpv when nothing is configured" do

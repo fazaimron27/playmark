@@ -14,14 +14,14 @@ defmodule Playmark.TUI.PlaybackActions do
   sent back to `Playmark.TUI.handle_info/2`; position checkpoints are written
   from inside that task so they never block the runtime.
 
-  `Playmark.Playback` is called two ways here. Its IO goes through
+  `Playmark.Player.Playback` is called two ways here. Its IO goes through
   `Playmark.TUI.Impl.playback/0` so tests can stub it; its config reads are
   called on the real module directly, because a stub implements only the IO
   half. `Playmark.TUI.Impl`'s moduledoc explains why mixing them up presents as
   a hung test rather than a failing one.
   """
 
-  alias Playmark.Playback
+  alias Playmark.Player.Playback
   alias Playmark.TUI.Impl
 
   # A checkpoint is only worth offering when there's a meaningful amount both

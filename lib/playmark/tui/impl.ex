@@ -16,7 +16,7 @@ defmodule Playmark.TUI.Impl do
 
   ## Not every call to these modules belongs here
 
-  `Playmark.Playback` is called two ways, and conflating them breaks the suite
+  `Playmark.Player.Playback` is called two ways, and conflating them breaks the suite
   in a way that presents as a hang rather than a failure. Its *IO* — `play/4`,
   `play_local/4`, `player/0`, `resume_supported?/0` — goes through `playback/0`
   below. Its *config reads* — `max_height/0`, `subtitles?/0`,
@@ -27,8 +27,9 @@ defmodule Playmark.TUI.Impl do
   until it times out.
   """
 
+  alias Playmark.Player.Playback
   alias Playmark.Source.{Channel, Explore, LocalFiles, Search, YouTubePlaylist}
-  alias Playmark.{History, Locals, Playback, Playlists, Subscriptions}
+  alias Playmark.{History, Locals, Playlists, Subscriptions}
 
   @doc "Playback IO only — see the moduledoc on config reads."
   def playback, do: Application.get_env(:playmark, :playback_impl, Playback)

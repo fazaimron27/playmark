@@ -1,4 +1,4 @@
-defmodule Playmark.Playback do
+defmodule Playmark.Player.Playback do
   @moduledoc """
   The playback facade: resolves configuration and dispatches to a player backend.
 

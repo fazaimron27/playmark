@@ -30,7 +30,7 @@ defmodule Playmark.Player.Ffplay do
 
   @behaviour Playmark.Player
 
-  alias Playmark.Playback
+  alias Playmark.Player.Playback
 
   # Bounds each yt-dlp socket read/connect so a black-holed network can't hang
   # stream resolution forever (matching Playmark.Player.Vlc / Playmark.Source.Channel).

@@ -116,7 +116,7 @@ defmodule Playmark.Player.Captions do
   end
 
   # Best-effort progress: reuse the reporter threaded through opts by
-  # Playmark.Playback (a 1-arity fn). Absent (e.g. the debug task builds opts
+  # Playmark.Player.Playback (a 1-arity fn). Absent (e.g. the debug task builds opts
   # without one) or non-function means no reporting — never a crash.
   defp report_selection(%{progress: fun}, selection) when is_function(fun, 1) do
     fun.({:caption, selection})

@@ -8,7 +8,7 @@ defmodule Playmark.Source.Channel do
   returns in about a second. We derive a plain `watch?v=<id>` URL per video,
   which the existing playback path already knows how to handle.
 
-  This mirrors `Playmark.Playback`: shell out to `yt-dlp`, parse its line-oriented
+  This mirrors `Playmark.Player.Playback`: shell out to `yt-dlp`, parse its line-oriented
   output, return a tagged tuple.
 
   ## Title language
