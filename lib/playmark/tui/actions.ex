@@ -16,6 +16,7 @@ defmodule Playmark.TUI.Actions do
 
   alias Playmark.TUI.{
     AddActions,
+    ExploreActions,
     Filter,
     HelpActions,
     HistoryActions,
@@ -524,106 +525,11 @@ defmodule Playmark.TUI.Actions do
 
   # --- Explore -------------------------------------------------------------
 
-  def open_explore(state) do
-    parent = self()
-    request_ref = make_ref()
-    impl = Impl.explore()
-
-    {:ok, task_pid} =
-      Task.start(fn ->
-        result =
-          try do
-            impl.homepage()
-          rescue
-            error -> {:error, Exception.message(error)}
-          end
-
-        send(parent, {:explore_result, request_ref, result})
-      end)
-
-    %{
-      state
-      | mode: :explore_loading,
-        explore_return: state.mode,
-        explore_videos: [],
-        explore_selected: 0,
-        explore_request_ref: request_ref,
-        explore_task_pid: task_pid,
-        status: {:info, "Loading YouTube recommendations… (Esc to cancel)"}
-    }
-  end
-
-  def cancel_explore(state) do
-    if is_pid(state.explore_task_pid) and Process.alive?(state.explore_task_pid) do
-      Process.exit(state.explore_task_pid, :kill)
-    end
-
-    %{
-      state
-      | mode: state.explore_return,
-        explore_request_ref: nil,
-        explore_task_pid: nil,
-        status: {:info, "Canceled"}
-    }
-  end
-
-  def handle_explore_key("q", state), do: {:stop, state}
-  def handle_explore_key("j", state), do: {:noreply, move_explore(state, 1)}
-  def handle_explore_key("down", state), do: {:noreply, move_explore(state, 1)}
-  def handle_explore_key("k", state), do: {:noreply, move_explore(state, -1)}
-  def handle_explore_key("up", state), do: {:noreply, move_explore(state, -1)}
-  def handle_explore_key("g", state), do: {:noreply, move_explore(state, :top)}
-  def handle_explore_key("home", state), do: {:noreply, move_explore(state, :top)}
-  def handle_explore_key("G", state), do: {:noreply, move_explore(state, :bottom)}
-  def handle_explore_key("end", state), do: {:noreply, move_explore(state, :bottom)}
-  def handle_explore_key("page_up", state), do: {:noreply, move_explore(state, -Nav.page_step())}
-  def handle_explore_key("page_down", state), do: {:noreply, move_explore(state, Nav.page_step())}
-  def handle_explore_key("enter", state), do: {:noreply, play_explore_selected(state)}
-  def handle_explore_key("b", state), do: {:noreply, bookmark_explore_selected(state)}
-  def handle_explore_key("e", state), do: {:noreply, enqueue_explore_selected(state, :tail)}
-  def handle_explore_key("n", state), do: {:noreply, enqueue_explore_selected(state, :next)}
-
-  def handle_explore_key("esc", state) do
-    {:noreply, %{state | mode: state.explore_return, status: nil}}
-  end
-
-  def handle_explore_key(_code, state), do: {:noreply, state}
-
-  defp move_explore(%{explore_videos: []} = state, _delta), do: state
-
-  defp move_explore(state, target) when target in [:top, :bottom] do
-    %{state | explore_selected: Nav.jump_index(state.explore_videos, target)}
-  end
-
-  defp move_explore(state, delta) do
-    selected = Nav.clamp(state.explore_selected + delta, 0, length(state.explore_videos) - 1)
-    %{state | explore_selected: selected}
-  end
-
-  defp selected_explore_video(state) do
-    Enum.at(state.explore_videos, state.explore_selected)
-  end
-
-  defp play_explore_selected(state) do
-    case selected_explore_video(state) do
-      nil -> state
-      video -> PlaybackActions.start_play(Nav.playable_video(video), :explore, state)
-    end
-  end
-
-  defp bookmark_explore_selected(state) do
-    case selected_explore_video(state) do
-      nil -> state
-      video -> AddActions.bookmark_video(video, state)
-    end
-  end
-
-  defp enqueue_explore_selected(state, target) do
-    case selected_explore_video(state) do
-      nil -> state
-      video -> QueueActions.enqueue(state, Nav.playable_video(video), video.title, target)
-    end
-  end
+  # Moved to Playmark.TUI.ExploreActions; delegated until the runtime calls it
+  # directly. Explore keeps its own cursor and rows, so nothing stays behind.
+  defdelegate open_explore(state), to: ExploreActions
+  defdelegate cancel_explore(state), to: ExploreActions
+  defdelegate handle_explore_key(code, state), to: ExploreActions
 
   # --- Search --------------------------------------------------------------
 
