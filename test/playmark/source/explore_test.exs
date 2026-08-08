@@ -1,7 +1,7 @@
-defmodule Playmark.ExploreTest do
+defmodule Playmark.Source.ExploreTest do
   use ExUnit.Case, async: true
 
-  alias Playmark.Explore
+  alias Playmark.Source.Explore
 
   @sep "\x1F"
 

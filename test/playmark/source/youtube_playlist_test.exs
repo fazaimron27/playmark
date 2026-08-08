@@ -1,7 +1,7 @@
-defmodule Playmark.YouTubePlaylistTest do
+defmodule Playmark.Source.YouTubePlaylistTest do
   use ExUnit.Case, async: true
 
-  alias Playmark.YouTubePlaylist
+  alias Playmark.Source.YouTubePlaylist
 
   describe "command arguments" do
     test "builds a bounded metadata request" do

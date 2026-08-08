@@ -1,4 +1,4 @@
-defmodule Playmark.Channel do
+defmodule Playmark.Source.Channel do
   @moduledoc """
   Reads a YouTube channel's videos, streams, and playlists with `yt-dlp`, without
   downloading anything and without an API key.
@@ -21,7 +21,8 @@ defmodule Playmark.Channel do
   title if oEmbed is unavailable for a given video.
   """
 
-  alias Playmark.{Cache, Metadata, YouTube}
+  alias Playmark.Source.Metadata
+  alias Playmark.{Cache, YouTube}
 
   # ASCII Unit Separator (0x1F): a control char that won't appear in a video
   # title, so we can reliably split id from title even when the title contains
@@ -109,7 +110,7 @@ defmodule Playmark.Channel do
   Lists the playlist containers published on a channel's Playlists tab.
 
   Returns `{:ok, [%{id, title, url}]}` or `{:error, reason}`. These rows are not
-  playable; callers open one through `Playmark.YouTubePlaylist.list_videos/1`.
+  playable; callers open one through `Playmark.Source.YouTubePlaylist.list_videos/1`.
   """
   def list_playlists(url, limit \\ limit())
       when is_binary(url) and is_integer(limit) and limit > 0 do

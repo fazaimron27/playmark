@@ -1,7 +1,7 @@
-defmodule Playmark.SearchTest do
+defmodule Playmark.Source.SearchTest do
   use ExUnit.Case, async: true
 
-  alias Playmark.Search
+  alias Playmark.Source.Search
 
   describe "build_args/2" do
     test "builds a ytsearchN: pseudo-URL with the flat-playlist print format" do
@@ -17,7 +17,7 @@ defmodule Playmark.SearchTest do
              ]
 
       # The id/title separator must be the same ASCII Unit Separator (0x1F)
-      # Playmark.Channel.parse_videos/1 splits on, or search output won't parse.
+      # Playmark.Source.Channel.parse_videos/1 splits on, or search output won't parse.
       assert Enum.any?(args, &String.contains?(&1, "\x1F"))
     end
 

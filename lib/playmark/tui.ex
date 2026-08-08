@@ -47,7 +47,7 @@ defmodule Playmark.TUI do
                     replace the underlying page.
 
   Subscriptions store only the channel URL and name; channel tabs are fetched
-  live through `Playmark.Channel`. Discovered playlist containers remain
+  live through `Playmark.Source.Channel`. Discovered playlist containers remain
   transient unless the user saves one to the top-level Playlists view.
 
   Every operation that performs external I/O (adding, listing, playback) runs in

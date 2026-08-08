@@ -1,4 +1,4 @@
-defmodule Playmark.Metadata do
+defmodule Playmark.Source.Metadata do
   @moduledoc """
   Fetches YouTube video metadata without an API key.
 

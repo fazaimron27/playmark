@@ -88,7 +88,7 @@ defmodule Mix.Tasks.Playmark.Debug do
   # A mix task runs in its own BEAM, separate from a live `mix playmark`, so we
   # can't attach to a running TUI and read its heap. Instead we reproduce the
   # app's real workload in-process: the started-app baseline, then the cost of
-  # loading a channel exactly as the TUI does (Playmark.Channel.list_videos/2).
+  # loading a channel exactly as the TUI does (Playmark.Source.Channel.list_videos/2).
   defp mem_mode(nil) do
     shell = Mix.shell()
 
@@ -116,7 +116,7 @@ defmodule Mix.Tasks.Playmark.Debug do
 
     started = System.monotonic_time(:millisecond)
 
-    case Playmark.Channel.list_videos(url) do
+    case Playmark.Source.Channel.list_videos(url) do
       {:ok, videos} ->
         elapsed = (System.monotonic_time(:millisecond) - started) / 1000
         shell.info("  loaded #{video_count(videos)} in #{fmt(elapsed)}s (cold)\n")
@@ -154,7 +154,7 @@ defmodule Mix.Tasks.Playmark.Debug do
 
     started = System.monotonic_time(:millisecond)
 
-    case Playmark.Channel.list_videos(url) do
+    case Playmark.Source.Channel.list_videos(url) do
       {:ok, videos} ->
         warm = (System.monotonic_time(:millisecond) - started) / 1000
         saved = cold - warm

@@ -1,4 +1,4 @@
-defmodule Playmark.Explore do
+defmodule Playmark.Source.Explore do
   @moduledoc """
   Fetches YouTube's recommended feed for the Explore overlay.
 
@@ -8,7 +8,7 @@ defmodule Playmark.Explore do
   entries that are directly playable YouTube videos.
   """
 
-  alias Playmark.Channel
+  alias Playmark.Source.Channel
 
   @sep "\x1F"
   @homepage_url "https://www.youtube.com"

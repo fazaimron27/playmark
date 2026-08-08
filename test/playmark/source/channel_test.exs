@@ -1,10 +1,10 @@
-defmodule Playmark.ChannelTest do
+defmodule Playmark.Source.ChannelTest do
   # async: false — the enrich_titles/1 tests set a stubbed metadata impl and a
   # url->result mapping in global application env, which parallel modules must
   # not observe.
   use ExUnit.Case, async: false
 
-  alias Playmark.Channel
+  alias Playmark.Source.Channel
 
   describe "parse_videos/1" do
     test "parses id/title lines into video maps with a watch URL" do

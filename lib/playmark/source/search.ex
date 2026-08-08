@@ -1,10 +1,10 @@
-defmodule Playmark.Search do
+defmodule Playmark.Source.Search do
   @moduledoc """
   Searches YouTube with `yt-dlp`, without an API key.
 
   `yt-dlp` accepts a `ytsearchN:QUERY` pseudo-URL that returns YouTube's search
   results as a playlist. Combined with `--flat-playlist`, it emits the same
-  `id`/`title` line format `Playmark.Channel` reads for a channel listing. The TUI
+  `id`/`title` line format `Playmark.Source.Channel` reads for a channel listing. The TUI
   keeps these rows in an isolated Search overlay where they can be played,
   bookmarked, queued, and filtered without replacing the underlying page.
 
@@ -12,14 +12,14 @@ defmodule Playmark.Search do
   "today's news" that surfaces fresh videos in practice, since YouTube already
   ranks recent news highly, but it is not a strict date filter.
 
-  This mirrors `Playmark.Channel`: shell out to `yt-dlp`, parse its line-oriented
+  This mirrors `Playmark.Source.Channel`: shell out to `yt-dlp`, parse its line-oriented
   output, return a tagged tuple. Titles are enriched through the same oEmbed path
-  (`Playmark.Channel.enrich_titles/1`) so they match what bookmarking would store.
+  (`Playmark.Source.Channel.enrich_titles/1`) so they match what bookmarking would store.
   """
 
-  alias Playmark.Channel
+  alias Playmark.Source.Channel
 
-  # Same ASCII Unit Separator (0x1F) `Playmark.Channel` uses, so the shared
+  # Same ASCII Unit Separator (0x1F) `Playmark.Source.Channel` uses, so the shared
   # `parse_videos/1` splits id from title reliably.
   @sep "\x1F"
 
@@ -27,7 +27,7 @@ defmodule Playmark.Search do
   @default_limit 20
 
   # Bounds each yt-dlp socket read/connect so a black-holed network can't hang a
-  # search forever (matching Playmark.Channel). The TUI terminates its tracked
+  # search forever (matching Playmark.Source.Channel). The TUI terminates its tracked
   # Search task on cancellation; this remains the final network bound.
   @default_socket_timeout 30
 
@@ -38,7 +38,7 @@ defmodule Playmark.Search do
 
   Returns `{:ok, [%{id: String.t(), title: String.t(), url: String.t()}]}` or
   `{:error, reason}`. Each map also carries `:live`, `:duration`, and `:views`
-  (see `Playmark.Channel.parse_videos/1`).
+  (see `Playmark.Source.Channel.parse_videos/1`).
   """
   def search(query, limit \\ limit()) when is_binary(query) and is_integer(limit) do
     query = String.trim(query)
@@ -75,7 +75,7 @@ defmodule Playmark.Search do
   defp limit, do: Application.get_env(:playmark, :search_limit, @default_limit)
 
   # yt-dlp socket timeout as a string arg (shared :socket_timeout key, default
-  # @default_socket_timeout — see Playmark.Config and Playmark.Channel).
+  # @default_socket_timeout — see Playmark.Config and Playmark.Source.Channel).
   defp socket_timeout,
     do: to_string(Application.get_env(:playmark, :socket_timeout, @default_socket_timeout))
 end

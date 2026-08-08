@@ -1,7 +1,7 @@
-defmodule Playmark.LocalFilesTest do
+defmodule Playmark.Source.LocalFilesTest do
   use ExUnit.Case, async: true
 
-  alias Playmark.LocalFiles
+  alias Playmark.Source.LocalFiles
 
   setup do
     dir =

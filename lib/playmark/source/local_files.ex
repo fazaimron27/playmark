@@ -1,9 +1,9 @@
-defmodule Playmark.LocalFiles do
+defmodule Playmark.Source.LocalFiles do
   @moduledoc """
   Reads the browsable entries in a registered local directory.
 
-  This is the local-filesystem counterpart to `Playmark.Channel`: where Channel
-  shells out to `yt-dlp` for a channel's videos, `Playmark.LocalFiles` reads a
+  This is the local-filesystem counterpart to `Playmark.Source.Channel`: where Channel
+  shells out to `yt-dlp` for a channel's videos, `Playmark.Source.LocalFiles` reads a
   directory's top-level entries and keeps child directories plus files that look
   like playable media. File entries retain the `%{id, title, url}` shape used by
   channel videos, while every entry has a `:kind` discriminator so the TUI can

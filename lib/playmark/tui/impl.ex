@@ -27,18 +27,8 @@ defmodule Playmark.TUI.Impl do
   until it times out.
   """
 
-  alias Playmark.{
-    Channel,
-    Explore,
-    History,
-    LocalFiles,
-    Locals,
-    Playback,
-    Playlists,
-    Search,
-    Subscriptions,
-    YouTubePlaylist
-  }
+  alias Playmark.Source.{Channel, Explore, LocalFiles, Search, YouTubePlaylist}
+  alias Playmark.{History, Locals, Playback, Playlists, Subscriptions}
 
   @doc "Playback IO only — see the moduledoc on config reads."
   def playback, do: Application.get_env(:playmark, :playback_impl, Playback)

@@ -3,12 +3,13 @@ defmodule Playmark.Playlists do
   Context for saved YouTube playlists.
 
   Only playlist metadata is persisted. Entries are fetched live through
-  `Playmark.YouTubePlaylist` whenever a playlist is opened.
+  `Playmark.Source.YouTubePlaylist` whenever a playlist is opened.
   """
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{Playlist, Repo, YouTube, YouTubePlaylist}
+  alias Playmark.Source.YouTubePlaylist
+  alias Playmark.{Playlist, Repo, YouTube}
 
   @doc "Lists saved YouTube playlists, newest first."
   def list_playlists do

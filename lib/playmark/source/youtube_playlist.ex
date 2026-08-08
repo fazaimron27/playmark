@@ -1,4 +1,4 @@
-defmodule Playmark.YouTubePlaylist do
+defmodule Playmark.Source.YouTubePlaylist do
   @moduledoc """
   Resolves YouTube playlist metadata and current entries with `yt-dlp`.
 
