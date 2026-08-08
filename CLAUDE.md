@@ -28,6 +28,20 @@ The app requires `yt-dlp` and one media player (`vlc` by default, or `mpv`/`ffpl
 
 ## Architecture
 
+Every directory under `lib/playmark/` holds one *kind* of thing, and a module's name matches its path:
+
+```
+tui.ex + tui/         the ex_ratatui shell, its action modules, Filter, View
+source/               the external-read boundary — oEmbed, yt-dlp, filesystem
+player/               the playback facade, the three backends, Control, Captions
+<context>.ex + <context>/   an Ecto context with its schema nested beneath it —
+                      bookmarks/bookmark.ex, queue/item.ex, history/item.ex, …
+youtube.ex            pure URL validation and canonicalization, no IO
+cache.ex config.ex repo.ex application.ex system_check.ex    infrastructure
+```
+
+A new file goes wherever its kind already lives. If it is a *new* kind, that is a new directory — not another file in the root, which is how this became one flat directory of 27 unrelated modules before.
+
 Layers, outermost to innermost:
 
 - **`Playmark.TUI`** — the `ex_ratatui` app shell. Owns the runtime callbacks (`mount/1`, `handle_event/2`, `handle_info/2`, `render/2`) and delegates:
@@ -48,9 +62,9 @@ Layers, outermost to innermost:
   grep -nE 'state\.(selected|videos|filter|channel_name|channel_url|local_)' \
     lib/playmark/tui/*_actions.ex   # expect zero hits
   ```
-- **Contexts** (`Playmark.Bookmarks`, `Playmark.Subscriptions`, `Playmark.Playlists`, `Playmark.Locals`) — Ecto-backed CRUD over their singular schemas. `Playlists` means saved YouTube playlists; `Locals` means registered filesystem directories. Playlist and subscription contents are fetched live rather than persisted.
+- **Contexts** (`Playmark.Bookmarks`, `Playmark.Subscriptions`, `Playmark.Playlists`, `Playmark.Locals`) — Ecto-backed CRUD over their singular schemas, each nested beneath the context that owns it (`Playmark.Bookmarks.Bookmark`, `Playmark.Locals.Local`, …). `Playlists` means saved YouTube playlists; `Locals` means registered filesystem directories. Playlist and subscription contents are fetched live rather than persisted.
 - **`Playmark.YouTube`** — permissive host validation plus source-specific canonicalization. `canonical_channel_url/1` strips trailing channel-tab segments. `canonical_playlist_url/1` requires `list=` and normalizes direct and watch links to one playlist URL.
-- **External-IO modules** (`Playmark.Metadata`, `Playmark.Channel`, `Playmark.Search`, `Playmark.Explore`, `Playmark.YouTubePlaylist`, `Playmark.LocalFiles`, `Playmark.Playback` + its player backends) — the oEmbed / `yt-dlp` / filesystem / player boundary. `YouTubePlaylist` reads bounded flat playlist metadata and entries; `LocalFiles.list_entries/1` reads one folder's child directories and media files. Both return tagged results without blocking the TUI process.
+- **`Playmark.Source.*`** (`Metadata`, `Channel`, `Search`, `Explore`, `YouTubePlaylist`, `LocalFiles`) — the external-*read* boundary: oEmbed, `yt-dlp`, and the filesystem. `YouTubePlaylist` reads bounded flat playlist metadata and entries; `LocalFiles.list_entries/1` reads one folder's child directories and media files. All of them return tagged results without blocking the TUI process. `Playmark.Player.Playback` + its backends are the other half of the IO boundary — external *output* — and live under `player/` (see *Playback player differences* below).
 - **`Playmark.Cache`** — a generic ETS-backed key/value cache owned by a GenServer in the supervision tree (`Playmark.Application`). Reads (`get/1`) run directly against a public, read-optimized ETS table from the calling process — including `Task.async_stream` children — while writes (`put/2`, a cast) funnel through the GenServer so the size cap is enforced in one place. The cap is crude: at `@max_entries` it drops the whole table rather than track an LRU. Only memoize values that are effectively immutable or where a stale read is harmless; do **not** cache anything that must stay live (e.g. a channel's video set). Its one current user is title enrichment (see below).
 
 ### The non-blocking task model (central to the TUI)
@@ -74,15 +88,15 @@ The ordinary term lives in `state.filter` with `filter_return` remembering `:lis
 
 ### Live source contents
 
-A subscription persists only the canonical channel URL and name. `Playmark.Channel.list_videos/2` fetches playable Videos/Streams rows; `Playmark.Channel.list_playlists/1` fetches non-playable playlist containers from `/playlists`. In direct channel video modes, `v`/`s` switch playable tabs and `p` opens the playlist-container level. There, `Enter` loads the selected container through `Playmark.YouTubePlaylist.list_videos/1`, while contextual `p` persists that resolved container through `Playlists.save_playlist/2`. Nested playlist videos set `videos_return: :channel_playlists`, so Esc restores the preserved parent rows/cursor/filter. Discovered containers remain transient unless explicitly saved.
+A subscription persists only the canonical channel URL and name. `Playmark.Source.Channel.list_videos/2` fetches playable Videos/Streams rows; `Playmark.Source.Channel.list_playlists/1` fetches non-playable playlist containers from `/playlists`. In direct channel video modes, `v`/`s` switch playable tabs and `p` opens the playlist-container level. There, `Enter` loads the selected container through `Playmark.Source.YouTubePlaylist.list_videos/1`, while contextual `p` persists that resolved container through `Playlists.save_playlist/2`. Nested playlist videos set `videos_return: :channel_playlists`, so Esc restores the preserved parent rows/cursor/filter. Discovered containers remain transient unless explicitly saved.
 
 Each video map also carries `:duration` (runtime in seconds) and `:views` (view count), both integers or `nil`, parsed by `Channel.parse_videos/1` from the `%(duration)s`/`%(view_count)s` fields that ride along in the same fast `--flat-playlist` call (no per-video probe). `Playmark.TUI.View` renders these as **Duration** and **Views** columns on the playable YouTube lists — the ordinary `:videos` list (channel uploads and playlist entries), Search results, and Explore — via the shared `video_row/1` helper (`format_duration/1` → `M:SS`/`H:MM:SS`, `format_views/1` → compact `4M`/`12K`, blank on `nil`). The Streams tab keeps its Title/Status layout and Locals keep Name/Type; a source that omits a field (or an older cached row shape) renders a blank cell, never a crash.
 
-Each video map carries a `:live` tag — `:live` / `:ended` / `:upcoming` / `:none` — parsed from yt-dlp's `%(live_status)s` field by `Channel.parse_videos/1`. That parser is shared with `Playmark.Search`, so the two callers' `--print` templates and the parser must stay in lockstep; the template is `id / title / live_status / duration / view_count`, and the parser tolerates shorter lines (a 3-field status-only line, or a legacy 2-field line) by defaulting the absent fields to `:none`/`nil`. `enrich_titles/1` preserves `:live`, `:duration`, and `:views` (it only overwrites `:title`/`:author`). `Explore` and `YouTubePlaylist` have their own parsers that carry the same `:duration`/`:views` fields (each with a private `parse_int/1`). Live playback needs no special handling — a live URL flows through the normal play path and joins at the live edge (no `--live-from-start`).
+Each video map carries a `:live` tag — `:live` / `:ended` / `:upcoming` / `:none` — parsed from yt-dlp's `%(live_status)s` field by `Channel.parse_videos/1`. That parser is shared with `Playmark.Source.Search`, so the two callers' `--print` templates and the parser must stay in lockstep; the template is `id / title / live_status / duration / view_count`, and the parser tolerates shorter lines (a 3-field status-only line, or a legacy 2-field line) by defaulting the absent fields to `:none`/`nil`. `enrich_titles/1` preserves `:live`, `:duration`, and `:views` (it only overwrites `:title`/`:author`). `Explore` and `YouTubePlaylist` have their own parsers that carry the same `:duration`/`:views` fields (each with a private `parse_int/1`). Live playback needs no special handling — a live URL flows through the normal play path and joins at the live edge (no `--live-from-start`).
 
-A saved playlist (`Playmark.Playlist`) persists only its canonical URL, title, and channel. It may be added by URL through `Playlists.add_playlist/1` or directly from a discovered channel container through `Playlists.save_playlist/2`. `Playmark.YouTubePlaylist.list_videos/2` fetches up to `playlist_limit` current entries in source order each time it opens.
+A saved playlist (`Playmark.Playlists.Playlist`) persists only its canonical URL, title, and channel. It may be added by URL through `Playlists.add_playlist/1` or directly from a discovered channel container through `Playlists.save_playlist/2`. `Playmark.Source.YouTubePlaylist.list_videos/2` fetches up to `playlist_limit` current entries in source order each time it opens.
 
-A local (`Playmark.Local`) persists only a root directory path and basename. `Playmark.LocalFiles.list_entries/1` reads one folder at a time, returning real child directories before supported media files in natural filename order; child directory symlinks are omitted. Local folders reuse `:videos`, while a transient stack preserves each parent's path, rows, cursor, and filter. `r` rereads only the current frame through the tracked local request and restores its filter and selected entry ID; failed reads keep cached rows and never remove the persisted registration. Local playback skips yt-dlp stream resolution, and local files cannot be bookmarked.
+A local (`Playmark.Locals.Local`) persists only a root directory path and basename. `Playmark.Source.LocalFiles.list_entries/1` reads one folder at a time, returning real child directories before supported media files in natural filename order; child directory symlinks are omitted. Local folders reuse `:videos`, while a transient stack preserves each parent's path, rows, cursor, and filter. `r` rereads only the current frame through the tracked local request and restores its filter and selected entry ID; failed reads keep cached rows and never remove the persisted registration. Local playback skips yt-dlp stream resolution, and local files cannot be bookmarked.
 
 The **queue** (`Playmark.Queue`) and **history** (`Playmark.History`) are the deliberate opposite: they store *content* outright, because it can't be re-derived from a handle. The queue persists user-curated items with an explicit `position`; history persists a log of what was played. Each row carries the source-agnostic `%{title, url, author, local}` fields the play path needs (the `local` flag forks `play/2` vs `play_local/2`), so a queued/history item replays without re-fetching. History is written from `Playmark.TUI.PlaybackActions.start_play/4` — the single funnel every play routes through — after any resume choice and immediately before the playback task starts. Rewatching *upserts* on a unique index on `:url` (bumps `played_at`, refreshes title/author) rather than adding a duplicate row — the deliberate opposite of `queue_items`, which allows duplicates. History is unbounded (no retention cap). Its nullable `resume_position_ms`/`duration_ms` fields are updated independently of `played_at`; mpv and VLC checkpoint finite, seekable media, while ffplay and live media do not.
 
@@ -90,11 +104,11 @@ The **queue** (`Playmark.Queue`) and **history** (`Playmark.History`) are the de
 
 ### Title consistency
 
-`yt-dlp --flat-playlist` returns titles in YouTube's default locale, while oEmbed returns the original-language title that bookmarking stores. `Playmark.Channel.enrich_titles/1` re-fetches each flat title via oEmbed in parallel (bounded concurrency + timeout) so the video list matches what a bookmark would save; a failed lookup falls back to the flat title. The same oEmbed lookup also yields the channel name, attached to each video as `:author` (the player's artist metadata — see below); a failed lookup leaves `:author` nil. Resolved titles and authors are memoized in `Playmark.Cache` under `{:title, id}` and `{:author, id}` keys (both effectively immutable), so reopening a channel or repeating a search only issues oEmbed requests for ids not already cached. A failed lookup is not cached.
+`yt-dlp --flat-playlist` returns titles in YouTube's default locale, while oEmbed returns the original-language title that bookmarking stores. `Playmark.Source.Channel.enrich_titles/1` re-fetches each flat title via oEmbed in parallel (bounded concurrency + timeout) so the video list matches what a bookmark would save; a failed lookup falls back to the flat title. The same oEmbed lookup also yields the channel name, attached to each video as `:author` (the player's artist metadata — see below); a failed lookup leaves `:author` nil. Resolved titles and authors are memoized in `Playmark.Cache` under `{:title, id}` and `{:author, id}` keys (both effectively immutable), so reopening a channel or repeating a search only issues oEmbed requests for ids not already cached. A failed lookup is not cached.
 
 ### Playback player differences
 
-`Playmark.Playback` is a thin facade: it reads config (player, quality, captions), builds a resolved opts map, and dispatches to a backend implementing the `Playmark.Player` behaviour — `Playmark.Player.Mpv`, `Playmark.Player.Vlc`, or `Playmark.Player.Ffplay`. The behaviour (`play/2`, `play_local/2`, `executable/0`) keeps the backends in sync at compile time. mpv and VLC launch through `Playmark.Player.Control`, which owns the Port lifecycle, connects to a unique local control socket, throttles position checkpoints, and returns `:completed`, `:stopped`, or `:unknown`; ffplay remains on the simpler blocking `Playback.run/2` path because it has no stable control API. mpv gets exact JSON IPC properties/end reasons. VLC is polled through RC and classifies completion by the final position's distance from the known duration. The `:playback_impl` seam and its test stub still target `Playmark.Playback` — the split is internal.
+`Playmark.Player.Playback` is a thin facade: it reads config (player, quality, captions), builds a resolved opts map, and dispatches to a backend implementing the `Playmark.Player` behaviour — `Playmark.Player.Mpv`, `Playmark.Player.Vlc`, or `Playmark.Player.Ffplay`. The behaviour (`play/2`, `play_local/2`, `executable/0`) keeps the backends in sync at compile time. mpv and VLC launch through `Playmark.Player.Control`, which owns the Port lifecycle, connects to a unique local control socket, throttles position checkpoints, and returns `:completed`, `:stopped`, or `:unknown`; ffplay remains on the simpler blocking `Playback.run/2` path because it has no stable control API. mpv gets exact JSON IPC properties/end reasons. VLC is polled through RC and classifies completion by the final position's distance from the known duration. The `:playback_impl` seam and its test stub still target `Playmark.Player.Playback` — the split is internal.
 
 `mpv` drives `yt-dlp` itself and is handed the YouTube URL directly (steered to the stream client via `--ytdl-raw-options`). `vlc` can't fetch YouTube pages, so `Playmark.Player.Vlc` pre-resolves stream URLs with `yt-dlp -g` (split video+audio streams are recombined via `--input-slave`). Both force the **stream** client `web_safari` for the video — other clients return signed URLs that yield `HTTP 403`. Preserve this when touching playback.
 
@@ -119,28 +133,28 @@ The same `-J` probe also carries a top-level `"chapters"` array. `Captions.chapt
 `Playmark.Config.load/0` runs once at application startup and loads the optional `~/.config/playmark/config.env`. Recognized limits include `search_limit`, `explore_limit`, `playlist_limit`, and `channel_limit`, alongside playback, subtitle, oEmbed-enrichment (`oembed_timeout_ms`, `oembed_concurrency`), and socket-timeout settings.
 
 The consuming modules read those keys via `Application.get_env/3`, each passing the built-in default as the fallback — so the default lives at the read site, not in `Playmark.Config`, and a missing file / missing key / invalid value all resolve identically:
-- `Playmark.Playback.player/0` → `:player` (the shipped config selects `:vlc`; the reader falls back to `:mpv` only when unset); `Playmark.Playback.format/0` → `:max_height` (default 1080), building the `bestvideo[height<=N]+bestaudio/best` yt-dlp format string; `Playmark.Playback.subtitles?/0` → `:subtitles` (default `true`); `Playmark.Playback.subtitle_default/0` → `:subtitle_default` (default `"en"`), `subtitle_fallback/0` → `:subtitle_fallback` (default `nil`), and `subtitle_translate/0` → `:subtitle_translate` (default `true`) feed the caption preference chain. `Mix.Tasks.Playmark.Debug` calls `Playback.format/0` so its diagnostic mirrors real playback.
-- `Playmark.Channel` → `:channel_limit` (default 30 rows per Videos, Streams, or Playlists tab), `:oembed_timeout_ms` (4000), `:oembed_concurrency` (10).
-- `Playmark.Search` → `:search_limit` (default 20).
-- `Playmark.Explore` → `:explore_limit` (default 20).
-- `Playmark.YouTubePlaylist` → `:playlist_limit` (default 100).
-- `:socket_timeout` (default 30, seconds) is passed to `yt-dlp --socket-timeout` by `Playmark.Channel`, `Playmark.Search`, `Playmark.Explore`, `Playmark.YouTubePlaylist`, `Playmark.Player.Vlc`, `Playmark.Player.Ffplay`, and `Playmark.Player.Captions`. It bounds each socket read/connect so a black-holed network can't hang a call forever. Most TUI cancellation paths only drop a late result; Search and Explore additionally terminate tracked tasks. (`Playmark.Metadata`'s direct oEmbed fetch bounds itself separately with `receive_timeout: 4000` + `retry: false`.)
+- `Playmark.Player.Playback.player/0` → `:player` (the shipped config selects `:vlc`; the reader falls back to `:mpv` only when unset); `Playmark.Player.Playback.format/0` → `:max_height` (default 1080), building the `bestvideo[height<=N]+bestaudio/best` yt-dlp format string; `Playmark.Player.Playback.subtitles?/0` → `:subtitles` (default `true`); `Playmark.Player.Playback.subtitle_default/0` → `:subtitle_default` (default `"en"`), `subtitle_fallback/0` → `:subtitle_fallback` (default `nil`), and `subtitle_translate/0` → `:subtitle_translate` (default `true`) feed the caption preference chain. `Mix.Tasks.Playmark.Debug` calls `Playback.format/0` so its diagnostic mirrors real playback.
+- `Playmark.Source.Channel` → `:channel_limit` (default 30 rows per Videos, Streams, or Playlists tab), `:oembed_timeout_ms` (4000), `:oembed_concurrency` (10).
+- `Playmark.Source.Search` → `:search_limit` (default 20).
+- `Playmark.Source.Explore` → `:explore_limit` (default 20).
+- `Playmark.Source.YouTubePlaylist` → `:playlist_limit` (default 100).
+- `:socket_timeout` (default 30, seconds) is passed to `yt-dlp --socket-timeout` by `Playmark.Source.Channel`, `Playmark.Source.Search`, `Playmark.Source.Explore`, `Playmark.Source.YouTubePlaylist`, `Playmark.Player.Vlc`, `Playmark.Player.Ffplay`, and `Playmark.Player.Captions`. It bounds each socket read/connect so a black-holed network can't hang a call forever. Most TUI cancellation paths only drop a late result; Search and Explore additionally terminate tracked tasks. (`Playmark.Source.Metadata`'s direct oEmbed fetch bounds itself separately with `receive_timeout: 4000` + `retry: false`.)
 
 When adding a user-facing setting: add it to the `@keys` map in `Playmark.Config` with a coercion, and read it with `Application.get_env(:playmark, key, default)` at the use site keeping the current hardcoded value as the default. Invalid values are dropped with a warning (logged during boot, before `Mix.Tasks.Playmark` detaches the console handler). There are no secrets or API keys — don't add a config mechanism aimed at those.
 
 ### Test seams
 
 Modules that touch the outside world are swapped in tests via `Application.get_env` seams, defaulting to the real implementation:
-- `:playback_impl` (default `Playmark.Playback`)
-- `:channel_impl` (default `Playmark.Channel`)
+- `:playback_impl` (default `Playmark.Player.Playback`)
+- `:channel_impl` (default `Playmark.Source.Channel`)
 - `:subscriptions_impl` (default `Playmark.Subscriptions`)
-- `:metadata_impl` (default `Playmark.Metadata`)
-- `:search_impl` (default `Playmark.Search`)
-- `:explore_impl` (default `Playmark.Explore`)
+- `:metadata_impl` (default `Playmark.Source.Metadata`)
+- `:search_impl` (default `Playmark.Source.Search`)
+- `:explore_impl` (default `Playmark.Source.Explore`)
 - `:playlists_impl` (default `Playmark.Playlists`)
 - `:locals_impl` (default `Playmark.Locals`)
-- `:youtube_playlist_impl` (default `Playmark.YouTubePlaylist`)
-- `:local_files_impl` (default `Playmark.LocalFiles`)
+- `:youtube_playlist_impl` (default `Playmark.Source.YouTubePlaylist`)
+- `:local_files_impl` (default `Playmark.Source.LocalFiles`)
 - `:history_impl` (default `Playmark.History`)
 
 Tests set these with `Application.put_env` and clean up with `on_exit`, so the suite never spawns a real player or hits the network. Follow this pattern rather than mocking.

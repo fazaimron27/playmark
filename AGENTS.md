@@ -11,12 +11,13 @@
 ## Execution Model
 
 - `Playmark.Application` loads `~/.config/playmark/config.env`, injects the runtime SQLite path, starts `Repo` and `Cache`, then auto-migrates. `Mix.Tasks.Playmark` performs executable checks and starts `Playmark.TUI`.
+- Each directory under `lib/playmark/` holds one kind of module and matches its namespace: `tui/` (shell, actions, view), `source/` (oEmbed/yt-dlp/filesystem reads), `player/` (the playback facade and backends), and one directory per Ecto context holding its schema (`bookmarks/bookmark.ex`, `queue/item.ex`). Add a new file beside its own kind; a new kind means a new directory, not another module in the root.
 - `Playmark.TUI` owns runtime callbacks, `TUI.Actions` owns the browse-core transitions/task spawning (with the overlays in sibling `TUI.*Actions` modules, plus `TUI.Nav` and `TUI.Impl`), and `TUI.View` is pure rendering. Keep network, shell, filesystem, and playback work out of `handle_event/2`: spawn a task and commit its message in `handle_info/2`.
 - Search, Explore, local-directory, channel-tab, channel-playlist, and playlist-video requests track both a task PID and request ref. Cancellation kills the task and clears the ref; result handlers must reject stale refs. Older add paths are untracked and discard late messages through mode guards.
 - Search/Explore/Queue/History are overlays that must restore the exact underlying browse mode. Ordinary videos, Search results, and channel playlist containers intentionally keep separate rows, cursors, and filters.
 - Local folders reuse `:videos`; each parent frame preserves path, rows, cursor, and filter. `r` refreshes only the current frame and preserves its filtered selection by entry ID. Directory entries are non-playable and non-queueable, and child directory symlinks are intentionally omitted.
 - Footer expiry is declarative: `TUI.subscriptions/1` arms the one-shot timer and `{:clear_status, status}` only clears the matching status. Do not add ad-hoc status timers.
-- `Channel` and `Search` share `Channel.parse_videos/1`; keep their yt-dlp `--print` field order in lockstep, including `live_status`.
+- `Source.Channel` and `Source.Search` share `Source.Channel.parse_videos/1`; keep their yt-dlp `--print` field order in lockstep, including `live_status`.
 - `Cache` is ETS-backed and clears the whole table at its cap. Cache only effectively immutable data; never cache live channel/playlist contents.
 
 ## Data And Tests
@@ -25,7 +26,7 @@
 - Production uses `~/.config/playmark/playmark.db`, WAL, and `pool_size: 1`; increasing the pool can reintroduce the SQLite WAL initialization race.
 - Tests recreate `playmark_test.db` and migrate it once in `test/test_helper.exs`; application startup skips migrations in test.
 - Database cases use `Playmark.DataCase` and must not be async. It clears tables directly instead of using SQL Sandbox; add every new persisted schema to its cleanup.
-- Tests must not contact YouTube or launch players. Replace external I/O through the existing `Application.get_env` implementation seams and restore overrides in `on_exit`; seams are scoped: for example, `:metadata_impl` controls channel enrichment, while bookmark creation calls `Playmark.Metadata` directly, and `TUI.mount/1` reads real persisted contexts.
+- Tests must not contact YouTube or launch players. Replace external I/O through the existing `Application.get_env` implementation seams and restore overrides in `on_exit`; seams are scoped: for example, `:metadata_impl` controls channel enrichment, while bookmark creation calls `Playmark.Source.Metadata` directly, and `TUI.mount/1` reads real persisted contexts.
 - Add schema changes as new timestamped migrations; startup auto-runs migrations, so do not edit one that may already have run in a user's database.
 
 ## Playback
