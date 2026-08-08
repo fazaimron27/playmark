@@ -696,8 +696,12 @@ defmodule Playmark.TUI.View do
     "seeking #{lang(default)}#{fallback_suffix(fallback)}"
   end
 
-  # After resolution: the concrete track that won the preference chain.
+  # After resolution: the concrete track that won the preference chain. A
+  # translated track is called out separately from a native auto one — it's a
+  # machine translation of a speech-recognition transcript, a rougher tier the
+  # user should be able to attribute a bad caption to.
   defp caption_detail(%{result: {:manual, key}}), do: "#{lang(key)}, uploader-provided"
+  defp caption_detail(%{result: {:translated, key}}), do: "#{lang(key)}, auto-translated"
   defp caption_detail(%{result: {:auto, key}}), do: "#{lang(key)}, auto-generated"
   defp caption_detail(%{result: :none}), do: "none available"
 

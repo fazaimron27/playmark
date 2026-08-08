@@ -1416,9 +1416,9 @@ defmodule Playmark.TUI.Actions do
   # or subtitles disabled) so the view omits the line entirely. Otherwise the
   # configured preference chain — first-choice `default`, optional `fallback`
   # language — with `result` left nil until the backend reports what actually
-  # matched (`{:manual, lang}` / `{:auto, lang}` / `:none`, folded in by
-  # Playmark.TUI). This lets the step read "want en (fallback fr)…" up front and
-  # firm up to "en · uploader" once resolved.
+  # matched (`{:manual, lang}` / `{:translated, lang}` / `{:auto, lang}` /
+  # `:none`, folded in by Playmark.TUI). This lets the step read "want en
+  # (fallback fr)…" up front and firm up to "en · uploader" once resolved.
   defp captions_plan(_player, true = _local?), do: nil
   defp captions_plan(:ffplay, false = _local?), do: nil
 
