@@ -42,6 +42,7 @@ max_height = 1080         # cap playback resolution (video height in pixels)
 subtitles = true          # show captions (default true)
 subtitle_default = en     # first-choice caption language (default en)
 subtitle_fallback = id    # second-choice language (optional, no default)
+subtitle_translate = true # accept machine-translated captions (default true)
 search_limit = 20         # results per YouTube search
 explore_limit = 20        # cards fetched from YouTube's homepage
 playlist_limit = 100      # videos fetched when opening a playlist
@@ -317,16 +318,44 @@ ffplay resolve it before launching the player.
 ### Captions
 
 Captions are on by default; set `subtitles = false` to turn them off. playmark
-picks a track by a three-step preference chain:
+picks a track by **language first, quality second** — listing two languages ranks
+them, so a machine translation into your first choice beats a human-made track in
+your second:
 
 1. an uploader-provided track in `subtitle_default` (default `en`),
-2. else an uploader-provided track in `subtitle_fallback` (optional, no default),
-3. else YouTube's auto-generated track in the video's spoken language.
+2. else a translation into `subtitle_default`,
+3. else an uploader-provided track in `subtitle_fallback` (optional, no default),
+4. else a translation into `subtitle_fallback`,
+5. else YouTube's auto-generated track in the video's spoken language.
 
-So `subtitle_default = id` with `subtitle_fallback = en` means "prefer the
-uploader's Indonesian captions, then their English ones, then auto-generated
-captions in whatever language is spoken." A video with no matching track simply
-plays without captions.
+Steps 2 and 4 need `subtitle_translate = true` (the default); set it to `false`
+to drop them and get original-language captions instead.
+
+So `subtitle_default = id` with `subtitle_fallback = en` means "Indonesian if it
+exists at all, translating something if need be; otherwise English, again
+translating if need be; otherwise whatever is spoken." A video with no matching
+track simply plays without captions.
+
+#### Where translations come from
+
+YouTube will translate any caption track into ~150 languages, so a requested
+language is almost always reachable. There are two sources, and playmark prefers
+the better one:
+
+- **an uploader's track** — keyed `id-en` ("Indonesian from English"). A human
+  wrote the source text, so the translation has a solid input. This is the same
+  thing the web player's "auto-translate" does to a manual track.
+- **the auto-generated transcript** — keyed plainly (`id`). Speech recognition
+  first, then translation: two lossy passes, so expect rougher results.
+
+Given a choice, playmark translates an uploader track in a language you listed
+(so you can sanity-check a line that reads strangely), then any other uploader
+track, then the transcript. A Korean podcast with uploader English subtitles and
+`subtitle_default = id` therefore yields `id-en` — Indonesian by way of the human
+English text, not by way of Korean speech recognition.
+
+The Now Playing panel labels which tier you got, so a bad caption is
+attributable.
 
 Captions can't ride along with the video stream, because YouTube needs a
 different yt-dlp "player client" for each. The client that returns a playable

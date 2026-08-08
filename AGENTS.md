@@ -32,7 +32,9 @@
 
 - Do not merge the yt-dlp clients: streams must use `web_safari` (fetchable URLs), while captions must be probed/downloaded separately with `default` (caption tracks without a PO token).
 - mpv receives the YouTube URL and drives yt-dlp; downloaded captions require both `--sub-file` and `--sid=1`. VLC pre-resolves with `yt-dlp -g` and joins split audio through `--input-slave`. ffplay forces one muxed `best[height<=N]` stream and intentionally skips captions.
-- Caption selection is manual `subtitle_default`, then manual `subtitle_fallback`, then auto captions in the spoken language. It is best-effort; clean temporary VTT files in `after` and test `Captions.select/2` with synthetic probe maps, not the network.
+- Caption selection is language-first, quality-second: manual `subtitle_default`, then a translation into it, then manual `subtitle_fallback`, then a translation into that, then auto captions in the spoken language. Translation tiers are skipped when `subtitle_translate = false`. Do not restore the old both-manual-tiers-first order — it made `subtitle_default` unreachable whenever the uploader supplied the fallback language.
+- Translations arrive as `automatic_captions` entries under two key shapes: plain (`id`, translating the ASR transcript) and `{target}-{source}` (`id-en`, translating that uploader track — better, since the source is human-written). `probe/2` must keep passing `--write-auto-subs` even though it downloads nothing: yt-dlp gates `{target}-{source}` keys behind that flag, and without it such videos expose no translations at all. `auto_kind/2` treats a `{target}-{source}` key as `:translated` only when the suffix names a real manual track, so regional variants like `en-US` stay `:auto`.
+- A translated track is tagged `:translated`, not `:auto`, so the UI can name the rougher tier. Captions are best-effort; clean temporary VTT files in `after` and test `Captions.select/2` with synthetic probe maps, not the network.
 
 ## Configuration And Terminal
 
