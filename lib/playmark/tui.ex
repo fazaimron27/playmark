@@ -85,6 +85,7 @@ defmodule Playmark.TUI do
     PlaybackActions,
     QueueActions,
     SearchActions,
+    Status,
     View
   }
 
@@ -423,11 +424,11 @@ defmodule Playmark.TUI do
   end
 
   def handle_info({:add_result, {:error, reason}, target}, %{mode: :fetching} = state) do
-    {:noreply, %{state | mode: :input, status: {:error, add_error(reason, target)}}}
+    {:noreply, %{state | mode: :input, status: {:error, Status.add_error(reason, target)}}}
   end
 
   def handle_info({:add_result, {:error, reason}}, %{mode: :fetching} = state) do
-    {:noreply, %{state | mode: :input, status: {:error, add_error(reason, :bookmark)}}}
+    {:noreply, %{state | mode: :input, status: {:error, Status.add_error(reason, :bookmark)}}}
   end
 
   # Results that arrive after the add was canceled (mode no longer :fetching).
@@ -445,7 +446,7 @@ defmodule Playmark.TUI do
     status =
       if videos == [],
         do: {:info, "No #{plural} found for #{name}"},
-        else: {:info, "#{count_with_label(videos, singular, plural)} from #{name}"}
+        else: {:info, "#{Status.count_with_label(videos, singular, plural)} from #{name}"}
 
     {:noreply,
      %{
@@ -520,7 +521,7 @@ defmodule Playmark.TUI do
     status =
       if playlists == [],
         do: {:info, "No playlists found for #{name}"},
-        else: {:info, "#{count_with_label(playlists, "playlist")} from #{name}"}
+        else: {:info, "#{Status.count_with_label(playlists, "playlist")} from #{name}"}
 
     {:noreply,
      %{
@@ -575,7 +576,7 @@ defmodule Playmark.TUI do
      %{
        state
        | channel_playlist_save_ref: nil,
-         status: {:error, add_error(reason, :playlist)}
+         status: {:error, Status.add_error(reason, :playlist)}
      }}
   end
 
@@ -639,7 +640,7 @@ defmodule Playmark.TUI do
     status =
       if videos == [],
         do: {:info, "No available videos in #{title}"},
-        else: {:info, "#{count_with_label(videos, "video")} from #{title}"}
+        else: {:info, "#{Status.count_with_label(videos, "video")} from #{title}"}
 
     {:noreply,
      %{
@@ -695,7 +696,7 @@ defmodule Playmark.TUI do
     status =
       if videos == [],
         do: {:info, "No results for #{query}"},
-        else: {:info, "#{count_with_label(videos, "result")} for #{query}"}
+        else: {:info, "#{Status.count_with_label(videos, "result")} for #{query}"}
 
     {:noreply,
      %{
@@ -736,7 +737,7 @@ defmodule Playmark.TUI do
     status =
       if videos == [],
         do: {:info, "No recommendations found"},
-        else: {:info, count_with_label(videos, "recommendation")}
+        else: {:info, Status.count_with_label(videos, "recommendation")}
 
     {:noreply,
      %{
@@ -780,7 +781,8 @@ defmodule Playmark.TUI do
   end
 
   def handle_info({:bookmark_video_result, {:error, reason}}, state) do
-    {:noreply, %{state | status: {:error, "Bookmark failed: #{add_error(reason, :bookmark)}"}}}
+    {:noreply,
+     %{state | status: {:error, "Bookmark failed: #{Status.add_error(reason, :bookmark)}"}}}
   end
 
   # --- playback ------------------------------------------------------------
@@ -963,33 +965,6 @@ defmodule Playmark.TUI do
   defp play_return_mode(%{videos: videos}) when videos != [], do: :videos
   defp play_return_mode(_state), do: :list
 
-  # A duplicate (the unique index on :url / :path) is the common, expected add
-  # failure — the raw "url has already been taken" reads poorly, so we map it to a
-  # per-target message. `target` is :bookmark / :subscription / :local / :playlist. Any
-  # other changeset error keeps the generic field-by-field text; a plain reason
-  # (e.g. a yt-dlp/oEmbed string) passes through unchanged.
-  defp add_error(%Ecto.Changeset{} = changeset, target) do
-    if duplicate?(changeset), do: duplicate_message(target), else: changeset_errors(changeset)
-  end
-
-  defp add_error(reason, _target), do: to_string(reason)
-
-  # True when the changeset failed only because the URL/path is already taken.
-  defp duplicate?(%Ecto.Changeset{errors: errors}) do
-    Enum.any?(errors, fn {_field, {_msg, opts}} -> opts[:constraint] == :unique end)
-  end
-
-  defp duplicate_message(:subscription), do: "Already subscribed to this channel"
-  defp duplicate_message(:local), do: "Directory already registered"
-  defp duplicate_message(:playlist), do: "Playlist already saved"
-  defp duplicate_message(_bookmark), do: "Already bookmarked"
-
-  defp count_with_label(items, singular, plural \\ nil) do
-    count = length(items)
-    label = if count == 1, do: singular, else: plural || singular <> "s"
-    "#{count} #{label}"
-  end
-
   defp local_entries_status([], name), do: "No media files or folders in #{name}"
 
   defp local_entries_status(entries, name) do
@@ -999,7 +974,7 @@ defmodule Playmark.TUI do
     counts =
       [{directories, "folder"}, {files, "file"}]
       |> Enum.reject(fn {count, _label} -> count == 0 end)
-      |> Enum.map_join(", ", fn {count, label} -> count_with_number(count, label) end)
+      |> Enum.map_join(", ", fn {count, label} -> Status.count_with_number(count, label) end)
 
     "#{counts} in #{name}"
   end
@@ -1031,16 +1006,5 @@ defmodule Playmark.TUI do
     else
       ~s(Local folder "#{pending.name}" is unavailable: #{reason})
     end
-  end
-
-  defp count_with_number(count, singular) do
-    label = if count == 1, do: singular, else: singular <> "s"
-    "#{count} #{label}"
-  end
-
-  defp changeset_errors(changeset) do
-    changeset
-    |> Ecto.Changeset.traverse_errors(fn {msg, _opts} -> msg end)
-    |> Enum.map_join("; ", fn {field, msgs} -> "#{field} #{Enum.join(msgs, ", ")}" end)
   end
 end

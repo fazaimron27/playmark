@@ -15,7 +15,7 @@ defmodule Playmark.TUI.HistoryActions do
   difference: it is never opened over the running player.
   """
 
-  alias Playmark.TUI.{Impl, Nav, PlaybackActions, QueueActions}
+  alias Playmark.TUI.{Impl, Nav, PlaybackActions, QueueActions, Status}
 
   @doc """
   Opens the watch-history modal, remembering the mode to restore on Esc.
@@ -141,7 +141,7 @@ defmodule Playmark.TUI.HistoryActions do
         confirm: %{
           action: :clear_history,
           prompt:
-            "Clear all #{count_with_label(state.history, "history entry", "history entries")}?"
+            "Clear all #{Status.count_with_label(state.history, "history entry", "history entries")}?"
         },
         status: nil
     }
@@ -186,10 +186,4 @@ defmodule Playmark.TUI.HistoryActions do
   # History list reads go through the impl seam too, so a test stub sees its own
   # recorded plays reflected in the modal.
   defp list_history, do: Impl.history().list_items()
-
-  defp count_with_label(items, singular, plural) do
-    count = length(items)
-    label = if count == 1, do: singular, else: plural || singular <> "s"
-    "#{count} #{label}"
-  end
 end

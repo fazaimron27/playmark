@@ -18,7 +18,7 @@ defmodule Playmark.TUI.QueueActions do
   """
 
   alias Playmark.Queue
-  alias Playmark.TUI.{Nav, PlaybackActions}
+  alias Playmark.TUI.{Nav, PlaybackActions, Status}
 
   # --- enqueueing -----------------------------------------------------------
 
@@ -180,7 +180,7 @@ defmodule Playmark.TUI.QueueActions do
         confirm_return: :queue_manage,
         confirm: %{
           action: :clear_queue,
-          prompt: "Clear all #{count_with_label(state.queue, "queued item")}?"
+          prompt: "Clear all #{Status.count_with_label(state.queue, "queued item")}?"
         },
         status: nil
     }
@@ -209,11 +209,5 @@ defmodule Playmark.TUI.QueueActions do
         playable = %{title: item.title, url: item.url, local: item.local, author: item.author}
         PlaybackActions.start_play(playable, :queue, state, item.id)
     end
-  end
-
-  defp count_with_label(items, singular, plural \\ nil) do
-    count = length(items)
-    label = if count == 1, do: singular, else: plural || singular <> "s"
-    "#{count} #{label}"
   end
 end
