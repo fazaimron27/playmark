@@ -532,10 +532,6 @@ defmodule Playmark.TUI.Actions do
     Enum.at(current_list(state), state.selected)
   end
 
-  # --- Explore -------------------------------------------------------------
-
-  # --- Search --------------------------------------------------------------
-
   # --- queue ---------------------------------------------------------------
 
   # Append the selected item to the playback queue, carrying the local? flag the
@@ -560,10 +556,6 @@ defmodule Playmark.TUI.Actions do
         QueueActions.enqueue(state, attrs, item.title, target)
     end
   end
-
-  # --- history -------------------------------------------------------------
-
-  # --- help ----------------------------------------------------------------
 
   # --- playback (bookmarks and videos) -------------------------------------
 
@@ -1001,10 +993,6 @@ defmodule Playmark.TUI.Actions do
         AddActions.bookmark_video(video, state)
     end
   end
-
-  # bookmark_video/2 and the four start_add/2 clauses moved to
-  # Playmark.TUI.AddActions. Both were private, so there is nothing to delegate;
-  # bookmark_selected_video/1 above stays here because it reads the browse cursor.
 
   # --- helpers -------------------------------------------------------------
 
