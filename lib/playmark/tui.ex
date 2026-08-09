@@ -78,6 +78,7 @@ defmodule Playmark.TUI do
 
   alias Playmark.TUI.{
     Actions,
+    AddActions,
     ExploreActions,
     Filter,
     HelpActions,
@@ -372,68 +373,11 @@ defmodule Playmark.TUI do
 
   # --- add results ----------------------------------------------------------
 
-  # Only acted on while still fetching: if the user canceled with Esc, mode is
-  # already back to :list and we drop the late result.
   @impl true
-  def handle_info({:add_result, {:ok, bookmark}}, %{mode: :fetching} = state) do
-    {:noreply,
-     %{
-       state
-       | view: :bookmarks,
-         mode: :list,
-         bookmarks: Bookmarks.list_bookmarks(),
-         selected: 0,
-         status: {:info, "Added: #{bookmark.title}"}
-     }}
-  end
+  def handle_info({:add_result, _result} = msg, state), do: AddActions.handle_result(msg, state)
 
-  def handle_info({:add_result, {:ok, subscription}, :subscription}, %{mode: :fetching} = state) do
-    {:noreply,
-     %{
-       state
-       | view: :subscriptions,
-         mode: :list,
-         subscriptions: Subscriptions.list_subscriptions(),
-         selected: 0,
-         status: {:info, "Subscribed: #{subscription.name}"}
-     }}
-  end
-
-  def handle_info({:add_result, {:ok, local}, :local}, %{mode: :fetching} = state) do
-    {:noreply,
-     %{
-       state
-       | view: :locals,
-         mode: :list,
-         locals: Locals.list_locals(),
-         selected: 0,
-         status: {:info, "Added: #{local.name}"}
-     }}
-  end
-
-  def handle_info({:add_result, {:ok, playlist}, :playlist}, %{mode: :fetching} = state) do
-    {:noreply,
-     %{
-       state
-       | view: :playlists,
-         mode: :list,
-         playlists: Playlists.list_playlists(),
-         selected: 0,
-         status: {:info, "Added: #{playlist.title}"}
-     }}
-  end
-
-  def handle_info({:add_result, {:error, reason}, target}, %{mode: :fetching} = state) do
-    {:noreply, %{state | mode: :input, status: {:error, Status.add_error(reason, target)}}}
-  end
-
-  def handle_info({:add_result, {:error, reason}}, %{mode: :fetching} = state) do
-    {:noreply, %{state | mode: :input, status: {:error, Status.add_error(reason, :bookmark)}}}
-  end
-
-  # Results that arrive after the add was canceled (mode no longer :fetching).
-  def handle_info({:add_result, _result}, state), do: {:noreply, state}
-  def handle_info({:add_result, _result, _target}, state), do: {:noreply, state}
+  def handle_info({:add_result, _result, _target} = msg, state),
+    do: AddActions.handle_result(msg, state)
 
   # --- channel video listing ----------------------------------------------
 
@@ -700,19 +644,8 @@ defmodule Playmark.TUI do
   # --- bookmarking a video --------------------------------------------------
   # Only the status line reflects progress/outcome; the originating list stays open.
 
-  def handle_info({:bookmark_video_result, {:ok, bookmark}}, state) do
-    {:noreply,
-     %{
-       state
-       | bookmarks: Bookmarks.list_bookmarks(),
-         status: {:info, "Bookmarked: #{bookmark.title}"}
-     }}
-  end
-
-  def handle_info({:bookmark_video_result, {:error, reason}}, state) do
-    {:noreply,
-     %{state | status: {:error, "Bookmark failed: #{Status.add_error(reason, :bookmark)}"}}}
-  end
+  def handle_info({:bookmark_video_result, _result} = msg, state),
+    do: AddActions.handle_bookmark_result(msg, state)
 
   # --- playback ------------------------------------------------------------
 

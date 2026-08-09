@@ -20,8 +20,8 @@ defmodule Playmark.TUI.AddActions do
   read-only.
   """
 
-  alias Playmark.Bookmarks
-  alias Playmark.TUI.Impl
+  alias Playmark.{Bookmarks, Locals, Playlists, Subscriptions}
+  alias Playmark.TUI.{Impl, Status}
 
   # --- bookmarking a video --------------------------------------------------
 
@@ -45,6 +45,25 @@ defmodule Playmark.TUI.AddActions do
     end)
 
     %{state | status: {:info, "Bookmarking #{video.title}…"}}
+  end
+
+  @doc false
+  # The other half of `bookmark_video/2`, called from Playmark.TUI.handle_info/2.
+  # No mode guard and no request ref: the originating list stayed usable, so
+  # there is no state a late result could corrupt — it just refreshes the
+  # bookmark list and sets a status.
+  def handle_bookmark_result({:bookmark_video_result, {:ok, bookmark}}, state) do
+    {:noreply,
+     %{
+       state
+       | bookmarks: Bookmarks.list_bookmarks(),
+         status: {:info, "Bookmarked: #{bookmark.title}"}
+     }}
+  end
+
+  def handle_bookmark_result({:bookmark_video_result, {:error, reason}}, state) do
+    {:noreply,
+     %{state | status: {:error, "Bookmark failed: #{Status.add_error(reason, :bookmark)}"}}}
   end
 
   # --- adding a bookmark, subscription, playlist, or local -----------------
@@ -123,4 +142,77 @@ defmodule Playmark.TUI.AddActions do
 
     %{state | mode: :fetching, status: {:info, "Registering directory… (Esc to cancel)"}}
   end
+
+  @doc false
+  # The other half of `start_add/2`, called from Playmark.TUI.handle_info/2.
+  #
+  # Only acted on while still fetching: if the user canceled with Esc, mode is
+  # already back to :list and we drop the late result.
+  #
+  # Each success clause switches to the view it added to and re-reads that
+  # context, which means writing `view`, `mode`, and `selected` — and `selected`
+  # is a browse-core key the overlay modules otherwise leave alone. It is a
+  # deliberate exception, recorded in CLAUDE.md: this is a terminal "the add
+  # finished, show me the row" commit, not ongoing collaboration with the browse
+  # cursor. Note the invariant's published grep matches dot reads
+  # (`state.selected`), not update writes, so it will not flag these.
+  def handle_result({:add_result, {:ok, bookmark}}, %{mode: :fetching} = state) do
+    {:noreply,
+     %{
+       state
+       | view: :bookmarks,
+         mode: :list,
+         bookmarks: Bookmarks.list_bookmarks(),
+         selected: 0,
+         status: {:info, "Added: #{bookmark.title}"}
+     }}
+  end
+
+  def handle_result({:add_result, {:ok, subscription}, :subscription}, %{mode: :fetching} = state) do
+    {:noreply,
+     %{
+       state
+       | view: :subscriptions,
+         mode: :list,
+         subscriptions: Subscriptions.list_subscriptions(),
+         selected: 0,
+         status: {:info, "Subscribed: #{subscription.name}"}
+     }}
+  end
+
+  def handle_result({:add_result, {:ok, local}, :local}, %{mode: :fetching} = state) do
+    {:noreply,
+     %{
+       state
+       | view: :locals,
+         mode: :list,
+         locals: Locals.list_locals(),
+         selected: 0,
+         status: {:info, "Added: #{local.name}"}
+     }}
+  end
+
+  def handle_result({:add_result, {:ok, playlist}, :playlist}, %{mode: :fetching} = state) do
+    {:noreply,
+     %{
+       state
+       | view: :playlists,
+         mode: :list,
+         playlists: Playlists.list_playlists(),
+         selected: 0,
+         status: {:info, "Added: #{playlist.title}"}
+     }}
+  end
+
+  def handle_result({:add_result, {:error, reason}, target}, %{mode: :fetching} = state) do
+    {:noreply, %{state | mode: :input, status: {:error, Status.add_error(reason, target)}}}
+  end
+
+  def handle_result({:add_result, {:error, reason}}, %{mode: :fetching} = state) do
+    {:noreply, %{state | mode: :input, status: {:error, Status.add_error(reason, :bookmark)}}}
+  end
+
+  # Results that arrive after the add was canceled (mode no longer :fetching).
+  def handle_result({:add_result, _result}, state), do: {:noreply, state}
+  def handle_result({:add_result, _result, _target}, state), do: {:noreply, state}
 end
