@@ -71,8 +71,6 @@ defmodule Playmark.TUI do
 
   use ExRatatui.App
 
-  require Logger
-
   alias ExRatatui.Event
   alias Playmark.{Bookmarks, History, Locals, Playlists, Queue, Subscriptions}
 
@@ -649,122 +647,11 @@ defmodule Playmark.TUI do
 
   # --- playback ------------------------------------------------------------
 
-  # Playback messages carry a request ref because closing one player and opening
-  # another can leave late Port/socket messages in the mailbox. Only the active
-  # play may update state. Progress remains accepted while Queue is open over the
-  # player, since the playing map still identifies the active request.
-  def handle_info(
-        {:play_progress, ref, {:caption, result}},
-        %{playing: %{ref: ref, captions: captions} = playing} = state
-      )
-      when is_map(captions) do
-    {:noreply, %{state | playing: %{playing | captions: %{captions | result: result}}}}
-  end
+  def handle_info({:play_progress, _ref, _stage} = msg, state),
+    do: PlaybackActions.handle_progress(msg, state)
 
-  def handle_info(
-        {:play_progress, ref, {:stream, shape}},
-        %{playing: %{ref: ref, stream: stream} = playing} = state
-      )
-      when is_map(stream) do
-    {:noreply, %{state | playing: %{playing | stream: %{stream | result: shape}}}}
-  end
-
-  # The caption probe also reports the video's chapter count; fold it into the
-  # playing map so the Now Playing panel can show it (informational only).
-  def handle_info(
-        {:play_progress, ref, {:chapters, count}},
-        %{playing: %{ref: ref} = playing} = state
-      )
-      when is_map(playing) do
-    {:noreply, %{state | playing: %{playing | chapters: count}}}
-  end
-
-  def handle_info({:play_progress, ref, stage}, %{playing: %{ref: ref} = playing} = state)
-      when is_map(playing) and is_atom(stage) do
-    {:noreply, %{state | playing: %{playing | stage: stage}}}
-  end
-
-  def handle_info({:play_progress, _ref, _stage}, state), do: {:noreply, state}
-
-  # A completed queued item is removed and advances. A stopped item keeps its
-  # place and opens Queue so playback can be resumed later.
-  def handle_info(
-        {:play_result, ref, {:ok, :completed}},
-        %{playing: %{ref: ref, origin: :queue}} = state
-      ) do
-    {:noreply, complete_queued_play(state)}
-  end
-
-  # ffplay has no stable position/end-reason API, so retain its historical clean
-  # exit behavior: an unknown clean exit advances the queue.
-  def handle_info(
-        {:play_result, ref, {:ok, :unknown}},
-        %{playing: %{ref: ref, origin: :queue, player: :ffplay}} = state
-      ) do
-    {:noreply, complete_queued_play(state)}
-  end
-
-  def handle_info(
-        {:play_result, ref, {:ok, reason}},
-        %{playing: %{ref: ref, origin: :queue}} = state
-      )
-      when reason in [:stopped, :unknown] do
-    {:noreply,
-     %{
-       state
-       | mode: :queue_manage,
-         queue_return: Map.get(state.playing, :return_mode, :list),
-         queue: Queue.list_items(),
-         queue_selected: 0,
-         playing: nil,
-         status: {:info, "Playback stopped; progress saved"}
-     }}
-  end
-
-  def handle_info(
-        {:play_result, ref, {:ok, reason}},
-        %{playing: %{ref: ref}} = state
-      )
-      when reason in [:completed, :stopped, :unknown] do
-    {:noreply, %{state | mode: play_return_mode(state), playing: nil, status: nil}}
-  end
-
-  # A queued item failed: stop the queue and surface the error, leaving the failed
-  # item in place so it is visible where playback stopped.
-  def handle_info(
-        {:play_result, ref, {:error, reason}},
-        %{playing: %{ref: ref, origin: :queue}} = state
-      ) do
-    Logger.error("Playback failed: #{reason}")
-
-    {:noreply,
-     %{
-       state
-       | mode: :queue_manage,
-         queue_return: Map.get(state.playing, :return_mode, :list),
-         queue: Queue.list_items(),
-         queue_selected: 0,
-         playing: nil,
-         status: {:error, "Playback failed: #{reason}"}
-     }}
-  end
-
-  def handle_info(
-        {:play_result, ref, {:error, reason}},
-        %{playing: %{ref: ref}} = state
-      ) do
-    Logger.error("Playback failed: #{reason}")
-
-    {:noreply,
-     %{
-       state
-       | mode: play_return_mode(state),
-         playing: nil,
-         status: {:error, "Playback failed: #{reason}"}
-     }}
-  end
-
-  def handle_info({:play_result, _ref, _result}, state), do: {:noreply, state}
+  def handle_info({:play_result, _ref, _result} = msg, state),
+    do: PlaybackActions.handle_result(msg, state)
 
   # The status-clear timer fired (see subscriptions/1). Clear the footer status,
   # but only if it still matches the status the timer was armed for — a newer
@@ -804,28 +691,6 @@ defmodule Playmark.TUI do
   def render(state, frame), do: View.render(state, frame)
 
   # --- handle_info helpers -------------------------------------------------
-
-  defp complete_queued_play(%{playing: %{queue_id: id}} = state) do
-    Queue.remove_by_id(id)
-    queue = Queue.list_items()
-    state = %{state | queue: queue}
-
-    case Queue.head() do
-      nil ->
-        return_mode = Map.get(state.playing, :return_mode, :list)
-        %{state | mode: return_mode, playing: nil, status: {:info, "Queue finished"}}
-
-      item ->
-        playable = %{title: item.title, url: item.url, local: item.local, author: item.author}
-        PlaybackActions.start_play(playable, :queue, state, item.id)
-    end
-  end
-
-  # Real playback records an explicit destination; the remaining clauses keep
-  # older/forced test states safe.
-  defp play_return_mode(%{playing: %{return_mode: return_mode}}), do: return_mode
-  defp play_return_mode(%{videos: videos}) when videos != [], do: :videos
-  defp play_return_mode(_state), do: :list
 
   defp local_entries_status([], name), do: "No media files or folders in #{name}"
 

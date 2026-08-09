@@ -21,7 +21,10 @@ defmodule Playmark.TUI.PlaybackActions do
   a hung test rather than a failing one.
   """
 
+  require Logger
+
   alias Playmark.Player.Playback
+  alias Playmark.Queue
   alias Playmark.TUI.Impl
 
   # A checkpoint is only worth offering when there's a meaningful amount both
@@ -213,9 +216,9 @@ defmodule Playmark.TUI.PlaybackActions do
   # drives yt-dlp itself; a local file needs no resolution) so the view omits the
   # detail. Otherwise the configured quality cap — the `:max_height` ceiling the
   # yt-dlp format selector is built around — with `result` left nil until the
-  # backend reports the resolved shape (`:split` / `:muxed`, folded in by Playmark.TUI).
-  # This lets the step read "up to 1080p…" up front and firm up to "1080p cap ·
-  # video+audio" once resolved.
+  # backend reports the resolved shape (`:split` / `:muxed`), folded in by
+  # `handle_progress/2` below. This lets the step read "up to 1080p…" up front
+  # and firm up to "1080p cap · video+audio" once resolved.
   defp stream_plan(player, false = _local?) when player in [:vlc, :ffplay],
     do: %{max_height: Playback.max_height(), result: nil}
 
@@ -226,8 +229,8 @@ defmodule Playmark.TUI.PlaybackActions do
   # configured preference chain — first-choice `default`, optional `fallback`
   # language — with `result` left nil until the backend reports what actually
   # matched (`{:manual, lang}` / `{:translated, lang}` / `{:auto, lang}` /
-  # `:none`, folded in by Playmark.TUI). This lets the step read "want en
-  # (fallback fr)…" up front and firm up to "en · uploader" once resolved.
+  # `:none`), folded in by `handle_progress/2` below. This lets the step read
+  # "want en (fallback fr)…" up front and firm up to "en · uploader" once resolved.
   defp captions_plan(_player, true = _local?), do: nil
   defp captions_plan(:ffplay, false = _local?), do: nil
 
@@ -250,6 +253,158 @@ defmodule Playmark.TUI.PlaybackActions do
     resolving ++ captions ++ [:playing]
   end
 
+  # --- committing what the player reports ----------------------------------
+
+  @doc """
+  Folds a progress report from the running backend into the `playing` map,
+  called from `Playmark.TUI.handle_info/2`.
+
+  Playback messages carry a request ref because closing one player and opening
+  another can leave late Port/socket messages in the mailbox. Only the active
+  play may update state. Progress remains accepted while Queue is open over the
+  player, since the playing map still identifies the active request.
+  """
+  def handle_progress(
+        {:play_progress, ref, {:caption, result}},
+        %{playing: %{ref: ref, captions: captions} = playing} = state
+      )
+      when is_map(captions) do
+    {:noreply, %{state | playing: %{playing | captions: %{captions | result: result}}}}
+  end
+
+  def handle_progress(
+        {:play_progress, ref, {:stream, shape}},
+        %{playing: %{ref: ref, stream: stream} = playing} = state
+      )
+      when is_map(stream) do
+    {:noreply, %{state | playing: %{playing | stream: %{stream | result: shape}}}}
+  end
+
+  # The caption probe also reports the video's chapter count; fold it into the
+  # playing map so the Now Playing panel can show it (informational only).
+  def handle_progress(
+        {:play_progress, ref, {:chapters, count}},
+        %{playing: %{ref: ref} = playing} = state
+      )
+      when is_map(playing) do
+    {:noreply, %{state | playing: %{playing | chapters: count}}}
+  end
+
+  def handle_progress({:play_progress, ref, stage}, %{playing: %{ref: ref} = playing} = state)
+      when is_map(playing) and is_atom(stage) do
+    {:noreply, %{state | playing: %{playing | stage: stage}}}
+  end
+
+  def handle_progress({:play_progress, _ref, _stage}, state), do: {:noreply, state}
+
+  @doc """
+  Commits the external player's exit, called from `Playmark.TUI.handle_info/2`.
+
+  How a play ends depends on where it came from, which is why `origin: :queue`
+  is matched ahead of the general clauses: a queued item that finished is
+  removed and the queue advances, while one that was stopped or failed keeps its
+  place and opens the queue modal so it can be resumed later.
+
+  The queue-origin clauses write `queue`, `queue_selected`, and `queue_return` —
+  `QueueActions`' state keys, noted as an exception in CLAUDE.md. The coupling
+  is not new: `return_mode/2` below already reads `state.queue_return`, and
+  advancing the queue already calls `start_play/4` from here. Having both halves
+  in one file makes it visible rather than introducing it.
+  """
+  def handle_result(
+        {:play_result, ref, {:ok, :completed}},
+        %{playing: %{ref: ref, origin: :queue}} = state
+      ) do
+    {:noreply, complete_queued_play(state)}
+  end
+
+  # ffplay has no stable position/end-reason API, so retain its historical clean
+  # exit behavior: an unknown clean exit advances the queue.
+  def handle_result(
+        {:play_result, ref, {:ok, :unknown}},
+        %{playing: %{ref: ref, origin: :queue, player: :ffplay}} = state
+      ) do
+    {:noreply, complete_queued_play(state)}
+  end
+
+  def handle_result(
+        {:play_result, ref, {:ok, reason}},
+        %{playing: %{ref: ref, origin: :queue}} = state
+      )
+      when reason in [:stopped, :unknown] do
+    {:noreply,
+     %{
+       state
+       | mode: :queue_manage,
+         queue_return: Map.get(state.playing, :return_mode, :list),
+         queue: Queue.list_items(),
+         queue_selected: 0,
+         playing: nil,
+         status: {:info, "Playback stopped; progress saved"}
+     }}
+  end
+
+  def handle_result(
+        {:play_result, ref, {:ok, reason}},
+        %{playing: %{ref: ref}} = state
+      )
+      when reason in [:completed, :stopped, :unknown] do
+    {:noreply, %{state | mode: play_return_mode(state), playing: nil, status: nil}}
+  end
+
+  # A queued item failed: stop the queue and surface the error, leaving the failed
+  # item in place so it is visible where playback stopped.
+  def handle_result(
+        {:play_result, ref, {:error, reason}},
+        %{playing: %{ref: ref, origin: :queue}} = state
+      ) do
+    Logger.error("Playback failed: #{reason}")
+
+    {:noreply,
+     %{
+       state
+       | mode: :queue_manage,
+         queue_return: Map.get(state.playing, :return_mode, :list),
+         queue: Queue.list_items(),
+         queue_selected: 0,
+         playing: nil,
+         status: {:error, "Playback failed: #{reason}"}
+     }}
+  end
+
+  def handle_result(
+        {:play_result, ref, {:error, reason}},
+        %{playing: %{ref: ref}} = state
+      ) do
+    Logger.error("Playback failed: #{reason}")
+
+    {:noreply,
+     %{
+       state
+       | mode: play_return_mode(state),
+         playing: nil,
+         status: {:error, "Playback failed: #{reason}"}
+     }}
+  end
+
+  def handle_result({:play_result, _ref, _result}, state), do: {:noreply, state}
+
+  defp complete_queued_play(%{playing: %{queue_id: id}} = state) do
+    Queue.remove_by_id(id)
+    queue = Queue.list_items()
+    state = %{state | queue: queue}
+
+    case Queue.head() do
+      nil ->
+        return_mode = Map.get(state.playing, :return_mode, :list)
+        %{state | mode: return_mode, playing: nil, status: {:info, "Queue finished"}}
+
+      item ->
+        playable = %{title: item.title, url: item.url, local: item.local, author: item.author}
+        start_play(playable, :queue, state, item.id)
+    end
+  end
+
   # --- where the player exits back to --------------------------------------
 
   defp return_mode(:search, _state), do: :search_results
@@ -262,4 +417,13 @@ defmodule Playmark.TUI.PlaybackActions do
   defp return_mode(:queue, state), do: state.queue_return
   defp return_mode(:list, %{mode: :videos}), do: :videos
   defp return_mode(_origin, _state), do: :list
+
+  # Where a finished play lands. `return_mode/2` above picks this at launch and
+  # records it on the playing map, so the first clause is the real path; the
+  # remaining two keep older/forced test states safe. The second reads `videos`,
+  # a browse-core key — a legacy fallback, kept adjacent to the function it
+  # duplicates rather than merged into it, which would be a rewrite.
+  defp play_return_mode(%{playing: %{return_mode: return_mode}}), do: return_mode
+  defp play_return_mode(%{videos: videos}) when videos != [], do: :videos
+  defp play_return_mode(_state), do: :list
 end
