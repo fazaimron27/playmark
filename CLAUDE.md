@@ -57,20 +57,20 @@ Layers, outermost to innermost:
   - **`Playmark.TUI.Filter`** — pure list filtering, shared with `Actions` (see *The list filter* below).
   - **`Playmark.TUI.View`** — pure `state -> [{widget, rect}]` rendering, no side effects.
 
-  The overlay modules own only their own state keys. `:selected`, `:filter`, `:videos`, `:channel_name`, `:channel_url`, `:videos_return`, and `:local_*` are read/written by `Actions` and `Filter` only; `:mode` and `:view` are shared reads. Hold that invariant when adding a handler:
+  The overlay modules own only their own state keys. `:selected`, `:filter`, `:videos`, `:channel_name`, `:channel_url`, `:videos_return`, and `:local_*` are read/written by `Actions` and `Filter` only. `:view`, `:mode`, `:status`, `:input`, and the `:confirm` pair are shared machinery — `:mode` in particular is *written* by every overlay when it opens or closes itself, so it is not a shared read. The four context lists (`:bookmarks`, `:subscriptions`, `:playlists`, `:locals`) are likewise unowned: whichever module writes the table refreshes the in-memory copy. Hold that invariant when adding a handler:
 
   ```sh
   grep -nE 'state\.(selected|videos|filter|channel_name|channel_url|local_)' \
     lib/playmark/tui/*_actions.ex   # expect zero hits
   ```
 
-  **The grep only catches dot reads.** A write goes through `%{state | selected: 0}`, where the key sits on its own line with no `state.` prefix, so no practical grep finds it. Three deliberate exceptions therefore exist and are recorded here rather than assumed caught:
+  **That grep is the fast manual check, not the enforcement.** It only catches dot reads: a write goes through `%{state | selected: 0}`, where the key sits on its own line with no `state.` prefix. `test/playmark/tui/state_ownership_test.exs` is the authority — it derives the real key set from `mount/1`, parses each overlay module, and walks the AST for writes, pattern matches, and dot reads alike, so it sees what the grep cannot. Three deliberate exceptions therefore exist, allowlisted there with their reasons and recorded here:
 
   1. `AddActions.handle_result/2`'s four success clauses write `view`, `mode`, and `selected: 0` — a terminal "the add finished, show me the row" commit, not ongoing collaboration with the browse cursor.
-  2. `PlaybackActions.handle_result/2`'s three queue-origin clauses and `complete_queued_play/1` write `queue`, `queue_selected`, and `queue_return` — `QueueActions`' keys. The coupling predates the split: `return_mode/2` already read `state.queue_return`, and advancing the queue already called `start_play/4`.
+  2. `PlaybackActions.handle_result/2`'s three queue-origin clauses and `complete_queued_play/1` write `queue`, `queue_selected`, and `queue_return` — `QueueActions`' keys — and `return_mode/2` reads both `state.queue_return` and `state.history_return` to map a play's origin back to that overlay's saved mode. The coupling predates the split: `return_mode/2` already read those keys, and advancing the queue already called `start_play/4`.
   3. `PlaybackActions.play_return_mode/1`'s middle clause matches on `videos` — a legacy fallback for older/forced test states, kept next to the `return_mode/2` it partly duplicates.
 
-  Anything beyond these three is a violation, not a precedent.
+  Anything beyond these three is a violation, not a precedent. Adding a fourth means adding it to `@exceptions` in that test *and* to this list — the test's sync assertions fail until both agree.
 - **Contexts** (`Playmark.Bookmarks`, `Playmark.Subscriptions`, `Playmark.Playlists`, `Playmark.Locals`) — Ecto-backed CRUD over their singular schemas, each nested beneath the context that owns it (`Playmark.Bookmarks.Bookmark`, `Playmark.Locals.Local`, …). `Playlists` means saved YouTube playlists; `Locals` means registered filesystem directories. Playlist and subscription contents are fetched live rather than persisted.
 - **`Playmark.YouTube`** — permissive host validation plus source-specific canonicalization. `canonical_channel_url/1` strips trailing channel-tab segments. `canonical_playlist_url/1` requires `list=` and normalizes direct and watch links to one playlist URL.
 - **`Playmark.Source.*`** (`Metadata`, `Channel`, `Search`, `Explore`, `YouTubePlaylist`, `LocalFiles`) — the external-*read* boundary: oEmbed, `yt-dlp`, and the filesystem. `YouTubePlaylist` reads bounded flat playlist metadata and entries; `LocalFiles.list_entries/1` reads one folder's child directories and media files. All of them return tagged results without blocking the TUI process. `Playmark.Player.Playback` + its backends are the other half of the IO boundary — external *output* — and live under `player/` (see *Playback player differences* below).
