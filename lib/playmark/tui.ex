@@ -689,44 +689,8 @@ defmodule Playmark.TUI do
 
   # --- Search results ------------------------------------------------------
 
-  def handle_info(
-        {:search_result, ref, {:ok, videos}, query},
-        %{mode: :search_loading, search_request_ref: ref} = state
-      ) do
-    status =
-      if videos == [],
-        do: {:info, "No results for #{query}"},
-        else: {:info, "#{Status.count_with_label(videos, "result")} for #{query}"}
-
-    {:noreply,
-     %{
-       state
-       | mode: :search_results,
-         search_videos: videos,
-         search_selected: 0,
-         search_query: query,
-         search_filter: "",
-         search_request_ref: nil,
-         search_task_pid: nil,
-         status: status
-     }}
-  end
-
-  def handle_info(
-        {:search_result, ref, {:error, reason}, _query},
-        %{mode: :search_loading, search_request_ref: ref} = state
-      ) do
-    {:noreply,
-     %{
-       state
-       | mode: :search_input,
-         search_request_ref: nil,
-         search_task_pid: nil,
-         status: {:error, "Search failed: #{reason}"}
-     }}
-  end
-
-  def handle_info({:search_result, _ref, _result, _query}, state), do: {:noreply, state}
+  def handle_info({:search_result, _ref, _result, _query} = msg, state),
+    do: SearchActions.handle_result(msg, state)
 
   # --- Explore results -----------------------------------------------------
 

@@ -25,7 +25,7 @@ defmodule Playmark.TUI.SearchActions do
   """
 
   alias ExRatatui.Event
-  alias Playmark.TUI.{AddActions, Filter, Impl, Nav, PlaybackActions, QueueActions}
+  alias Playmark.TUI.{AddActions, Filter, Impl, Nav, PlaybackActions, QueueActions, Status}
 
   @doc """
   Opens the overlay in query-input mode, remembering the mode to restore on Esc.
@@ -95,6 +95,54 @@ defmodule Playmark.TUI.SearchActions do
         status: {:info, "Searching #{query}… (Esc to cancel)"}
     }
   end
+
+  @doc """
+  Commits the result of the fetch `start_search/2` spawned, straight from
+  `Playmark.TUI.handle_info/2`.
+
+  The mode and ref in the head are the staleness check: a result only lands
+  while the overlay is still waiting on *that* request, so a page superseded by
+  a newer query — or cancelled outright by `cancel_search/1`, which clears the
+  ref — falls through to the last clause and is dropped.
+  """
+  def handle_result(
+        {:search_result, ref, {:ok, videos}, query},
+        %{mode: :search_loading, search_request_ref: ref} = state
+      ) do
+    status =
+      if videos == [],
+        do: {:info, "No results for #{query}"},
+        else: {:info, "#{Status.count_with_label(videos, "result")} for #{query}"}
+
+    {:noreply,
+     %{
+       state
+       | mode: :search_results,
+         search_videos: videos,
+         search_selected: 0,
+         search_query: query,
+         search_filter: "",
+         search_request_ref: nil,
+         search_task_pid: nil,
+         status: status
+     }}
+  end
+
+  def handle_result(
+        {:search_result, ref, {:error, reason}, _query},
+        %{mode: :search_loading, search_request_ref: ref} = state
+      ) do
+    {:noreply,
+     %{
+       state
+       | mode: :search_input,
+         search_request_ref: nil,
+         search_task_pid: nil,
+         status: {:error, "Search failed: #{reason}"}
+     }}
+  end
+
+  def handle_result({:search_result, _ref, _result, _query}, state), do: {:noreply, state}
 
   @doc """
   Esc during the load: terminates the fetch and closes the overlay.
