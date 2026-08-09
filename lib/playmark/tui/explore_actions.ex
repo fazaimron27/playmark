@@ -17,7 +17,7 @@ defmodule Playmark.TUI.ExploreActions do
   channel video does.
   """
 
-  alias Playmark.TUI.{AddActions, Impl, Nav, PlaybackActions, QueueActions}
+  alias Playmark.TUI.{AddActions, Impl, Nav, PlaybackActions, QueueActions, Status}
 
   @doc """
   Opens the overlay and starts the homepage fetch, remembering the mode to
@@ -55,6 +55,52 @@ defmodule Playmark.TUI.ExploreActions do
         status: {:info, "Loading YouTube recommendations… (Esc to cancel)"}
     }
   end
+
+  @doc """
+  Commits the result of the fetch `open_explore/1` started, straight from
+  `Playmark.TUI.handle_info/2`.
+
+  A failure returns to `explore_return` rather than staying in the overlay —
+  there is no query to correct, so an empty Explore page has nothing to offer.
+  (Search differs: it drops back to `:search_input`.)
+  """
+  def handle_result(
+        {:explore_result, ref, {:ok, videos}},
+        %{mode: :explore_loading, explore_request_ref: ref} = state
+      ) do
+    status =
+      if videos == [],
+        do: {:info, "No recommendations found"},
+        else: {:info, Status.count_with_label(videos, "recommendation")}
+
+    {:noreply,
+     %{
+       state
+       | mode: :explore,
+         explore_videos: videos,
+         explore_selected: 0,
+         explore_request_ref: nil,
+         explore_task_pid: nil,
+         status: status
+     }}
+  end
+
+  def handle_result(
+        {:explore_result, ref, {:error, reason}},
+        %{mode: :explore_loading, explore_request_ref: ref} = state
+      ) do
+    {:noreply,
+     %{
+       state
+       | mode: state.explore_return,
+         explore_request_ref: nil,
+         explore_task_pid: nil,
+         status: {:error, "Explore failed: #{reason}"}
+     }}
+  end
+
+  # A canceled or superseded Explore request must not replace a newer page.
+  def handle_result({:explore_result, _ref, _result}, state), do: {:noreply, state}
 
   @doc """
   Esc during the load: terminates the fetch and returns to the mode Explore was

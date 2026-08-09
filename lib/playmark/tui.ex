@@ -694,43 +694,8 @@ defmodule Playmark.TUI do
 
   # --- Explore results -----------------------------------------------------
 
-  def handle_info(
-        {:explore_result, ref, {:ok, videos}},
-        %{mode: :explore_loading, explore_request_ref: ref} = state
-      ) do
-    status =
-      if videos == [],
-        do: {:info, "No recommendations found"},
-        else: {:info, Status.count_with_label(videos, "recommendation")}
-
-    {:noreply,
-     %{
-       state
-       | mode: :explore,
-         explore_videos: videos,
-         explore_selected: 0,
-         explore_request_ref: nil,
-         explore_task_pid: nil,
-         status: status
-     }}
-  end
-
-  def handle_info(
-        {:explore_result, ref, {:error, reason}},
-        %{mode: :explore_loading, explore_request_ref: ref} = state
-      ) do
-    {:noreply,
-     %{
-       state
-       | mode: state.explore_return,
-         explore_request_ref: nil,
-         explore_task_pid: nil,
-         status: {:error, "Explore failed: #{reason}"}
-     }}
-  end
-
-  # A canceled or superseded Explore request must not replace a newer page.
-  def handle_info({:explore_result, _ref, _result}, state), do: {:noreply, state}
+  def handle_info({:explore_result, _ref, _result} = msg, state),
+    do: ExploreActions.handle_result(msg, state)
 
   # --- bookmarking a video --------------------------------------------------
   # Only the status line reflects progress/outcome; the originating list stays open.
