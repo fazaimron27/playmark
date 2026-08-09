@@ -56,17 +56,24 @@ defmodule Playmark.TUI do
   channel tabs, and playlist loads match request references and terminate tracked
   tasks. Older add paths discard late results through mode guards.
 
-  This module is the `ExRatatui.App` shell: it owns the runtime callbacks and
-  routes work to two collaborators — `Playmark.TUI.Actions` for state
-  transitions (key handling, navigation, task spawning) and `Playmark.TUI.View`
-  for rendering.
+  This module is the `ExRatatui.App` shell. It owns the runtime callbacks and
+  the browse-core half of the work, delegating everything else: state
+  transitions to `Playmark.TUI.Actions` and rendering to `Playmark.TUI.View`.
 
   `Actions` holds the browse core — the list / videos / channel-playlists /
   filter / input state machine, which is one machine and not separable. The
   overlays and the shared plumbing live in sibling modules: `TUI.PlaybackActions`,
   `TUI.QueueActions`, `TUI.HistoryActions`, `TUI.SearchActions`,
   `TUI.ExploreActions`, `TUI.HelpActions`, `TUI.AddActions`, plus `TUI.Nav`
-  (cursor math) and `TUI.Impl` (the test seams).
+  (cursor math), `TUI.Status` (footer text), and `TUI.Impl` (the test seams).
+
+  `handle_info/2` splits along the same line. The clauses here commit the browse
+  core's listings — a channel tab, a channel's playlist containers, a local
+  directory, a playlist's videos — because those write the keys `Actions` owns.
+  Every overlay's result is forwarded to the module that spawned it, so Search,
+  Explore, Add, and Playback each own both halves of their own message. Delivery
+  is unchanged by that: the task sends to this process either way, and
+  forwarding is a plain function call afterwards.
   """
 
   use ExRatatui.App

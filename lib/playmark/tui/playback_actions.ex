@@ -11,8 +11,9 @@ defmodule Playmark.TUI.PlaybackActions do
 
   Playback blocks for the external player's whole lifetime, so the facade call
   runs in a spawned task. Only visual stages and the correlated final result are
-  sent back to `Playmark.TUI.handle_info/2`; position checkpoints are written
-  from inside that task so they never block the runtime.
+  sent back to `Playmark.TUI.handle_info/2` — which forwards them straight back
+  here, to `handle_progress/2` and `handle_result/2`. Position checkpoints are
+  written from inside that task so they never block the runtime.
 
   `Playmark.Player.Playback` is called two ways here. Its IO goes through
   `Playmark.TUI.Impl.playback/0` so tests can stub it; its config reads are

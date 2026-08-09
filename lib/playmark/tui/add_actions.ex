@@ -154,8 +154,8 @@ defmodule Playmark.TUI.AddActions do
   # is a browse-core key the overlay modules otherwise leave alone. It is a
   # deliberate exception, recorded in CLAUDE.md: this is a terminal "the add
   # finished, show me the row" commit, not ongoing collaboration with the browse
-  # cursor. Note the invariant's published grep matches dot reads
-  # (`state.selected`), not update writes, so it will not flag these.
+  # cursor. Note that the invariant's published grep matches dot reads, not the
+  # `%{state | …}` writes these clauses use, so it will not flag them.
   def handle_result({:add_result, {:ok, bookmark}}, %{mode: :fetching} = state) do
     {:noreply,
      %{
