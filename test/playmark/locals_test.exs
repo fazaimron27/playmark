@@ -1,7 +1,8 @@
 defmodule Playmark.LocalsTest do
   use Playmark.DataCase, async: false
 
-  alias Playmark.{Local, Locals}
+  alias Playmark.Locals
+  alias Playmark.Locals.Local
 
   setup do
     dir =

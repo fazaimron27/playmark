@@ -5,7 +5,8 @@ end
 defmodule Playmark.PlaylistsTest do
   use Playmark.DataCase, async: false
 
-  alias Playmark.{Playlist, Playlists}
+  alias Playmark.Playlists
+  alias Playmark.Playlists.Playlist
 
   setup do
     Application.put_env(

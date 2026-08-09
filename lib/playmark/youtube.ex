@@ -50,7 +50,7 @@ defmodule Playmark.YouTube do
   distinct playlists; pasting `.../@handle/videos` would otherwise be stored and
   re-fetched as that exact tab forever, differing from `.../@handle`. Normalizing
   on add lets the app hold one canonical URL and choose the tab itself (see
-  `Playmark.Channel.list_videos/2`).
+  `Playmark.Source.Channel.list_videos/2`).
 
   Deliberately conservative: only a known tab word as the *final* path segment is
   removed (with any trailing slash). Watch links (`watch?v=`, `youtu.be/ID`) and

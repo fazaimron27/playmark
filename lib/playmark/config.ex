@@ -13,7 +13,7 @@ defmodule Playmark.Config do
   dependency check. It parses the file if it exists, coerces each recognized key
   to its type, and writes it into the
   `:playmark` application env with `Application.put_env/3`. The consuming modules
-  (`Playmark.Playback`, `Playmark.Channel`, `Playmark.Search`) read those keys via
+  (`Playmark.Player.Playback`, `Playmark.Source.Channel`, `Playmark.Source.Search`) read those keys via
   `Application.get_env/3`, each supplying the built-in default as the fallback —
   so a missing file, a missing key, or an invalid value all resolve to the same
   behavior the app had before any config existed.

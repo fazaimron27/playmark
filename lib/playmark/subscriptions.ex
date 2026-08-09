@@ -3,13 +3,15 @@ defmodule Playmark.Subscriptions do
   Context for creating and listing channel subscriptions.
 
   A subscription stores only the channel URL and name. The channel's videos are
-  never stored — they're fetched live via `Playmark.Channel` each time the
+  never stored — they're fetched live via `Playmark.Source.Channel` each time the
   subscription is opened, so the list is always current.
   """
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{Channel, Repo, Subscription, YouTube}
+  alias Playmark.Source.Channel
+  alias Playmark.Subscriptions.Subscription
+  alias Playmark.{Repo, YouTube}
 
   @doc """
   Lists all subscriptions by channel name in ascending order.
@@ -42,6 +44,6 @@ defmodule Playmark.Subscriptions do
   end
 
   # The channel name lookup shells out to yt-dlp; swappable in tests via the
-  # :channel_impl seam (default Playmark.Channel), like the TUI uses.
+  # :channel_impl seam (default Playmark.Source.Channel), like the TUI uses.
   defp channel, do: Application.get_env(:playmark, :channel_impl, Channel)
 end

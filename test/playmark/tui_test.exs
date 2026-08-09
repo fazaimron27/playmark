@@ -194,7 +194,8 @@ defmodule Playmark.TUITest do
 
   alias ExRatatui.Event
   alias ExRatatui.Runtime
-  alias Playmark.{Bookmark, History, Queue, TUI}
+  alias Playmark.Bookmarks.Bookmark
+  alias Playmark.{History, Queue, TUI}
 
   defp start_tui do
     {:ok, pid} = TUI.start_link(name: nil, test_mode: {80, 24})
@@ -743,7 +744,7 @@ defmodule Playmark.TUITest do
       playing = user_state(pid).playing
       assert playing.player == :ffplay
       assert playing.steps == [:resolving, :playing]
-      assert playing.stream == %{max_height: Playmark.Playback.max_height(), result: nil}
+      assert playing.stream == %{max_height: Playmark.Player.Playback.max_height(), result: nil}
       assert playing.captions == nil
 
       assert_receive {TestPlayback, play_task}, 1_000
@@ -829,7 +830,7 @@ defmodule Playmark.TUITest do
     end
 
     defp insert_sub(url, name) do
-      Repo.insert!(%Playmark.Subscription{url: url, name: name})
+      Repo.insert!(%Playmark.Subscriptions.Subscription{url: url, name: name})
     end
 
     test "Tab cycles bookmarks -> subscriptions -> playlists -> locals -> bookmarks" do
@@ -1341,7 +1342,7 @@ defmodule Playmark.TUITest do
       refute_receive {TestPlaylists, _second_task, ^playlist, "Channel A"}, 100
 
       saved =
-        Repo.insert!(%Playmark.Playlist{
+        Repo.insert!(%Playmark.Playlists.Playlist{
           url: playlist.url,
           title: playlist.title,
           channel: "Channel A"
@@ -1589,7 +1590,7 @@ defmodule Playmark.TUITest do
         view: :subscriptions,
         mode: :playing,
         bookmarks: [],
-        subscriptions: [%Playmark.Subscription{url: "u", name: "Chan A"}],
+        subscriptions: [%Playmark.Subscriptions.Subscription{url: "u", name: "Chan A"}],
         videos: [video],
         channel_name: "Chan A",
         selected: 0,
@@ -2036,7 +2037,7 @@ defmodule Playmark.TUITest do
     end
 
     defp insert_local(path, name) do
-      Repo.insert!(%Playmark.Local{path: path, name: name})
+      Repo.insert!(%Playmark.Locals.Local{path: path, name: name})
     end
 
     test "\"a\" opens the register prompt with a path placeholder" do
@@ -2673,7 +2674,7 @@ defmodule Playmark.TUITest do
     end
 
     defp insert_youtube_playlist(id, title \\ "Lessons") do
-      Repo.insert!(%Playmark.Playlist{
+      Repo.insert!(%Playmark.Playlists.Playlist{
         url: "https://www.youtube.com/playlist?list=#{id}",
         title: title,
         channel: "Teacher"
@@ -2799,7 +2800,7 @@ defmodule Playmark.TUITest do
     end
 
     test "renders saved playlists and opened playlist videos" do
-      playlist = %Playmark.Playlist{title: "Lessons", channel: "Teacher", url: "u"}
+      playlist = %Playmark.Playlists.Playlist{title: "Lessons", channel: "Teacher", url: "u"}
 
       state = %{
         view: :playlists,
@@ -3845,11 +3846,11 @@ defmodule Playmark.TUITest do
 
   defp duplicate_subscription_changeset do
     url = "https://youtube.com/@dup"
-    Repo.insert!(%Playmark.Subscription{url: url, name: "Chan"})
+    Repo.insert!(%Playmark.Subscriptions.Subscription{url: url, name: "Chan"})
 
     {:error, changeset} =
-      %Playmark.Subscription{}
-      |> Playmark.Subscription.changeset(%{url: url, name: "Chan"})
+      %Playmark.Subscriptions.Subscription{}
+      |> Playmark.Subscriptions.Subscription.changeset(%{url: url, name: "Chan"})
       |> Repo.insert()
 
     changeset
@@ -4351,11 +4352,11 @@ defmodule Playmark.TUITest do
 
   defp duplicate_local_changeset do
     path = "/tmp/playmark-dup-dir"
-    Repo.insert!(%Playmark.Local{path: path, name: "dir"})
+    Repo.insert!(%Playmark.Locals.Local{path: path, name: "dir"})
 
     {:error, changeset} =
-      %Playmark.Local{}
-      |> Playmark.Local.changeset(%{path: path, name: "dir"})
+      %Playmark.Locals.Local{}
+      |> Playmark.Locals.Local.changeset(%{path: path, name: "dir"})
       |> Repo.insert()
 
     changeset

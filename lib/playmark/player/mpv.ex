@@ -19,7 +19,7 @@ defmodule Playmark.Player.Mpv do
   @behaviour Playmark.Player
 
   alias Playmark.Player.{Captions, Control}
-  alias Playmark.Playback
+  alias Playmark.Player.Playback
 
   @impl true
   def play(url, opts) when is_binary(url) do

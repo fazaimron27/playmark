@@ -246,7 +246,7 @@ defmodule Playmark.Player.Control do
          duration when is_integer(duration) and duration > 0 <- state.duration_ms,
          true <- force? or checkpoint_due?(state.last_checkpoint_ms, position) do
       event = checkpoint_event(position, duration)
-      Playmark.Playback.report(state.opts, event)
+      Playmark.Player.Playback.report(state.opts, event)
       %{state | last_checkpoint_ms: position}
     else
       _other -> state
@@ -275,7 +275,7 @@ defmodule Playmark.Player.Control do
         {:error, error_message(state, status)}
 
       completed?(state) ->
-        Playmark.Playback.report(state.opts, :clear_checkpoint)
+        Playmark.Player.Playback.report(state.opts, :clear_checkpoint)
         {:ok, :completed}
 
       valid_position?(state) ->

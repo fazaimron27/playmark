@@ -9,7 +9,7 @@ defmodule Playmark.SystemCheck do
 
   require Logger
 
-  alias Playmark.Playback
+  alias Playmark.Player.Playback
 
   @install_hints %{
     "yt-dlp" => "https://github.com/yt-dlp/yt-dlp#installation",

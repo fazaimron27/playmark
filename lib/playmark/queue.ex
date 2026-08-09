@@ -7,7 +7,7 @@ defmodule Playmark.Queue do
   which store only a source handle and fetch contents live -- the queue *is*
   user-curated content, so it's stored outright, ordering included. Each item
   carries a `local` flag because the play path forks on it: local files go
-  straight to the player (`Playmark.Playback.play_local/2`), everything else is a
+  straight to the player (`Playmark.Player.Playback.play_local/2`), everything else is a
   YouTube URL that may need stream resolution (`play/2`). The active view can't
   decide this once a queue mixes sources, so the item must.
 
@@ -18,20 +18,21 @@ defmodule Playmark.Queue do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{QueueItem, Repo}
+  alias Playmark.Queue.Item
+  alias Playmark.Repo
 
   @doc """
   Lists all queue items in play order (lowest `position` first).
   """
   def list_items do
-    Repo.all(from(q in QueueItem, order_by: [asc: q.position]))
+    Repo.all(from(q in Item, order_by: [asc: q.position]))
   end
 
   @doc """
   The next item to play (lowest `position`), or `nil` if the queue is empty.
   """
   def head do
-    Repo.one(from(q in QueueItem, order_by: [asc: q.position], limit: 1))
+    Repo.one(from(q in Item, order_by: [asc: q.position], limit: 1))
   end
 
   @doc """
@@ -46,8 +47,8 @@ defmodule Playmark.Queue do
       |> Map.new(fn {k, v} -> {to_string(k), v} end)
       |> Map.put("position", next_position())
 
-    %QueueItem{}
-    |> QueueItem.changeset(attrs)
+    %Item{}
+    |> Item.changeset(attrs)
     |> Repo.insert()
   end
 
@@ -79,7 +80,7 @@ defmodule Playmark.Queue do
   # with the immediate predecessor, so re-reading positions after every step is
   # unnecessary — the item's own position is what shifts.
   defp promote_to_second(item) do
-    ids = Repo.all(from(q in QueueItem, order_by: [asc: q.position], select: q.id))
+    ids = Repo.all(from(q in Item, order_by: [asc: q.position], select: q.id))
 
     case Enum.find_index(ids, &(&1 == item.id)) do
       index when is_integer(index) and index > 1 ->
@@ -90,12 +91,12 @@ defmodule Playmark.Queue do
     end
   end
 
-  defp reload(%QueueItem{id: id}), do: Repo.get(QueueItem, id)
+  defp reload(%Item{id: id}), do: Repo.get(Item, id)
 
   @doc """
   Removes one item from the queue.
   """
-  def remove(%QueueItem{} = item) do
+  def remove(%Item{} = item) do
     Repo.delete(item)
   end
 
@@ -107,7 +108,7 @@ defmodule Playmark.Queue do
   (returns `:ok`) when the id is already gone.
   """
   def remove_by_id(id) do
-    case Repo.get(QueueItem, id) do
+    case Repo.get(Item, id) do
       nil -> :ok
       item -> Repo.delete(item) && :ok
     end
@@ -117,7 +118,7 @@ defmodule Playmark.Queue do
   Empties the queue.
   """
   def clear do
-    Repo.delete_all(QueueItem)
+    Repo.delete_all(Item)
     :ok
   end
 
@@ -126,9 +127,9 @@ defmodule Playmark.Queue do
 
   A no-op (returns `:ok`) when the item is already at the head.
   """
-  def move_up(%QueueItem{} = item) do
+  def move_up(%Item{} = item) do
     case Repo.one(
-           from(q in QueueItem,
+           from(q in Item,
              where: q.position < ^item.position,
              order_by: [desc: q.position],
              limit: 1
@@ -144,9 +145,9 @@ defmodule Playmark.Queue do
 
   A no-op (returns `:ok`) when the item is already at the tail.
   """
-  def move_down(%QueueItem{} = item) do
+  def move_down(%Item{} = item) do
     case Repo.one(
-           from(q in QueueItem,
+           from(q in Item,
              where: q.position > ^item.position,
              order_by: [asc: q.position],
              limit: 1
@@ -165,14 +166,14 @@ defmodule Playmark.Queue do
   # non-deterministic order) — either both land or neither does.
   defp swap(a, b) do
     Repo.transaction(fn ->
-      Repo.update!(QueueItem.changeset(a, %{"position" => b.position}))
-      Repo.update!(QueueItem.changeset(b, %{"position" => a.position}))
+      Repo.update!(Item.changeset(a, %{"position" => b.position}))
+      Repo.update!(Item.changeset(b, %{"position" => a.position}))
     end)
 
     :ok
   end
 
   defp next_position do
-    (Repo.one(from(q in QueueItem, select: max(q.position))) || 0) + 1
+    (Repo.one(from(q in Item, select: max(q.position))) || 0) + 1
   end
 end

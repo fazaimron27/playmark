@@ -31,10 +31,10 @@ defmodule Playmark.Player.Vlc do
   @behaviour Playmark.Player
 
   alias Playmark.Player.{Captions, Control}
-  alias Playmark.Playback
+  alias Playmark.Player.Playback
 
   # Bounds each yt-dlp socket read/connect so a black-holed network can't hang
-  # stream resolution forever (matching Playmark.Channel). On timeout yt-dlp
+  # stream resolution forever (matching Playmark.Source.Channel). On timeout yt-dlp
   # errors and play/2 returns {:error, _} rather than blocking indefinitely.
   # User-overridable via the :socket_timeout config key (see Playmark.Config).
   @default_socket_timeout 30
@@ -193,7 +193,7 @@ defmodule Playmark.Player.Vlc do
   end
 
   # yt-dlp socket timeout as a string arg (shared :socket_timeout key, default
-  # @default_socket_timeout — see Playmark.Config and Playmark.Channel).
+  # @default_socket_timeout — see Playmark.Config and Playmark.Source.Channel).
   defp socket_timeout,
     do: to_string(Application.get_env(:playmark, :socket_timeout, @default_socket_timeout))
 end

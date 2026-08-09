@@ -341,7 +341,8 @@ defmodule Playmark.TUI.View do
 
   # A static, hand-authored keybinding reference grouped by context. It's the one
   # place the full key set is spelled out — the footers only surface a mode's most
-  # relevant keys — so it's kept in sync with the handlers in Playmark.TUI.Actions.
+  # relevant keys — so it's kept in sync with the handlers in Playmark.TUI.Actions
+  # and its sibling *Actions modules.
   defp help_body do
     %Paragraph{
       text: help_text(),
@@ -576,8 +577,9 @@ defmodule Playmark.TUI.View do
   end
 
   # The "Now playing" panel shown in :playing mode: the video title on top, then
-  # the ordered steps for this play (seeded in Playmark.TUI.Actions) as a checklist
-  # that advances as the backend reports each stage. During :resolving/:captions
+  # the ordered steps for this play (seeded in Playmark.TUI.PlaybackActions) as a
+  # checklist that advances as the backend reports each stage. During
+  # :resolving/:captions
   # the external player hasn't taken the screen yet, so this panel is what the user
   # sees; once the external player launches it covers the terminal until it closes.
   defp now_playing(%{playing: %{steps: _steps, stage: _stage} = playing}) do

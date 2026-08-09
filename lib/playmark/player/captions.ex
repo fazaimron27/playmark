@@ -78,7 +78,7 @@ defmodule Playmark.Player.Captions do
   require Logger
 
   # Bounds each yt-dlp socket read/connect so a black-holed network can't hang
-  # caption probe/download forever (matching Playmark.Channel). Captions are
+  # caption probe/download forever (matching Playmark.Source.Channel). Captions are
   # best-effort, so on timeout yt-dlp errors and the video just plays without one.
   # User-overridable via the :socket_timeout config key (see Playmark.Config).
   @default_socket_timeout 30
@@ -116,7 +116,7 @@ defmodule Playmark.Player.Captions do
   end
 
   # Best-effort progress: reuse the reporter threaded through opts by
-  # Playmark.Playback (a 1-arity fn). Absent (e.g. the debug task builds opts
+  # Playmark.Player.Playback (a 1-arity fn). Absent (e.g. the debug task builds opts
   # without one) or non-function means no reporting — never a crash.
   defp report_selection(%{progress: fun}, selection) when is_function(fun, 1) do
     fun.({:caption, selection})
@@ -403,7 +403,7 @@ defmodule Playmark.Player.Captions do
   end
 
   # yt-dlp socket timeout as a string arg (shared :socket_timeout key, default
-  # @default_socket_timeout — see Playmark.Config and Playmark.Channel).
+  # @default_socket_timeout — see Playmark.Config and Playmark.Source.Channel).
   defp socket_timeout,
     do: to_string(Application.get_env(:playmark, :socket_timeout, @default_socket_timeout))
 end

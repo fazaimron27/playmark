@@ -2,7 +2,7 @@ defmodule Playmark.Player do
   @moduledoc """
   The contract a media-player backend implements.
 
-  `Playmark.Playback` is the public facade the rest of the app talks to; it reads
+  `Playmark.Player.Playback` is the public facade the rest of the app talks to; it reads
   configuration, builds an `opts` map, and dispatches to a backend module that
   implements this behaviour (`Playmark.Player.Mpv`, `Playmark.Player.Vlc`, or
   `Playmark.Player.Ffplay`). Keeping the players as separate modules behind one
@@ -15,9 +15,9 @@ defmodule Playmark.Player do
   """
 
   @typedoc """
-  Resolved playback options, built by `Playmark.Playback` from user config.
+  Resolved playback options, built by `Playmark.Player.Playback` from user config.
 
-    * `:format` — the `yt-dlp` format string (see `Playmark.Playback.format/0`).
+    * `:format` — the `yt-dlp` format string (see `Playmark.Player.Playback.format/0`).
     * `:subtitles?` — whether to attempt captions at all.
     * `:subtitle_default` — first-choice language code for uploader-provided
       captions (e.g. `"en"`).

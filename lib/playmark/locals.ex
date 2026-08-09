@@ -3,12 +3,13 @@ defmodule Playmark.Locals do
   Context for registering local media directories.
 
   A local stores only the directory path and its basename. Files are read live
-  through `Playmark.LocalFiles` whenever the directory is opened.
+  through `Playmark.Source.LocalFiles` whenever the directory is opened.
   """
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{Local, Repo}
+  alias Playmark.Locals.Local
+  alias Playmark.Repo
 
   @doc "Lists all registered local directories, newest first."
   def list_locals do

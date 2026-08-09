@@ -17,12 +17,12 @@ defmodule Playmark.DataCase do
   end
 
   setup do
-    Playmark.Repo.delete_all(Playmark.Bookmark)
-    Playmark.Repo.delete_all(Playmark.Subscription)
-    Playmark.Repo.delete_all(Playmark.Local)
-    Playmark.Repo.delete_all(Playmark.Playlist)
-    Playmark.Repo.delete_all(Playmark.QueueItem)
-    Playmark.Repo.delete_all(Playmark.HistoryItem)
+    Playmark.Repo.delete_all(Playmark.Bookmarks.Bookmark)
+    Playmark.Repo.delete_all(Playmark.Subscriptions.Subscription)
+    Playmark.Repo.delete_all(Playmark.Locals.Local)
+    Playmark.Repo.delete_all(Playmark.Playlists.Playlist)
+    Playmark.Repo.delete_all(Playmark.Queue.Item)
+    Playmark.Repo.delete_all(Playmark.History.Item)
     :ok
   end
 end

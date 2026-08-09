@@ -5,7 +5,9 @@ defmodule Playmark.Bookmarks do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Playmark.{Bookmark, Metadata, Repo, YouTube}
+  alias Playmark.Bookmarks.Bookmark
+  alias Playmark.Source.Metadata
+  alias Playmark.{Repo, YouTube}
 
   @doc """
   Lists all bookmarks, newest first.

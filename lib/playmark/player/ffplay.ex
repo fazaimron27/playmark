@@ -30,10 +30,10 @@ defmodule Playmark.Player.Ffplay do
 
   @behaviour Playmark.Player
 
-  alias Playmark.Playback
+  alias Playmark.Player.Playback
 
   # Bounds each yt-dlp socket read/connect so a black-holed network can't hang
-  # stream resolution forever (matching Playmark.Player.Vlc / Playmark.Channel).
+  # stream resolution forever (matching Playmark.Player.Vlc / Playmark.Source.Channel).
   # User-overridable via the :socket_timeout config key (see Playmark.Config).
   @default_socket_timeout 30
 
