@@ -83,16 +83,16 @@ defmodule Playmark.TUI.StateOwnershipTest do
       module: "PlaybackActions",
       accesses: [
         {"playback_actions.ex", :queue, :write},
-        {"playback_actions.ex", :queue_selected, :write},
         {"playback_actions.ex", :queue_return, :write},
         {"playback_actions.ex", :queue_return, :dotread},
         {"playback_actions.ex", :history_return, :dotread}
       ],
       why: """
-      The queue-origin result clauses and complete_queued_play/1 advance or halt
-      the queue, and return_mode/2 maps a play's origin to that overlay's saved
-      return mode — which means reading queue_return and history_return. The
-      coupling predates the split.
+      The queue-origin result clauses refresh the queue, and complete_queued_play/1
+      advances it — carrying the finished play's return mode into queue_return,
+      which is where return_mode/2 reads it once `playing` is cleared. return_mode/2
+      also maps a play's origin to that overlay's saved return mode, which means
+      reading queue_return and history_return. The coupling predates the split.
       """
     },
     %{

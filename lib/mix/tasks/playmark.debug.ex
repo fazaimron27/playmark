@@ -20,8 +20,23 @@ defmodule Mix.Tasks.Playmark.Debug do
   resolves the stream URL(s) and probes each exactly as VLC would — a ranged GET
   with VLC's User-Agent — reporting the real HTTP status. YouTube binds some
   stream URLs (e.g. the TV client's) to the client that requested them, so VLC
-  gets a 403 and exits immediately ("opens then closes"). This finds a strategy
-  whose URLs VLC can actually fetch.
+  gets a 403 and exits immediately ("opens then closes").
+
+  A reachable URL is not a playable one, and for HLS the difference is the whole
+  story: the *playlist* can serve 200 while its *segments* 403, which is where
+  YouTube's restrictions actually land. Reporting only the playlist status made
+  this task confidently green for videos that could not play at all. So a
+  playlist is now read and its first few segments fetched whole, in order, and
+  each status shown.
+
+  That yields three verdicts rather than two. `PARTIAL` matters: ffmpeg retries
+  and skips failed segments, so mpv usually plays anyway, while VLC's `adaptive`
+  demuxer can drop the whole input. Neither OK nor FAIL captures that, and it is
+  the signal for whether to switch players.
+
+  The segment check is a *sample*, not a playback. Three sequential fetches are a
+  far better proxy than one ranged request, but they are still not a player — do
+  not read a clean result as proof.
 
   Play mode is for the *other* failure: VLC plays for a while, then closes on its
   own. A one-byte probe can't catch that — it needs the real player running. This
@@ -52,6 +67,10 @@ defmodule Mix.Tasks.Playmark.Debug do
 
   # What VLC sends when it opens an HTTP stream.
   @vlc_user_agent "VLC/3.0.23 LibVLC/3.0.23"
+
+  # How many playlist segments to actually fetch. Three is enough to show whether
+  # failures are isolated or total, without pulling many megabytes per client.
+  @segment_sample 3
 
   # The clients Playmark.Player.Playback uses; play/subs modes mirror them exactly.
   # web_safari resolves fetchable streams but drops captions; default exposes
@@ -554,7 +573,9 @@ defmodule Mix.Tasks.Playmark.Debug do
 
     shell.info("\n== Testing yt-dlp player-client strategies ==")
     shell.info("  format: #{Playback.format()}")
-    shell.info("  probing each URL as VLC would (ranged GET, VLC User-Agent)\n")
+    shell.info("  probing each URL as VLC would (ranged GET, VLC User-Agent)")
+    shell.info("  HLS playlists also get their first #{@segment_sample} segments fetched,")
+    shell.info("  because a playlist can serve fine while its segments 403\n")
 
     results = Enum.map(@clients, &test_client(&1, url, shell))
 
@@ -564,13 +585,31 @@ defmodule Mix.Tasks.Playmark.Debug do
       shell.info("  #{String.pad_trailing(client, 24)} #{verdict}")
     end)
 
-    case Enum.find(results, fn {_c, v} -> String.starts_with?(v, "OK") end) do
-      {client, _} ->
-        shell.info("\n  → Working strategy: #{client}")
-        shell.info("    I'll wire this into the playback module.")
+    report_strategy(results, shell)
+  end
 
-      nil ->
-        shell.info("\n  → No strategy produced fetchable URLs. Paste this output back.")
+  defp report_strategy(results, shell) do
+    ok = Enum.find(results, fn {_c, v} -> String.starts_with?(v, "OK") end)
+    partial = Enum.find(results, fn {_c, v} -> String.starts_with?(v, "PARTIAL") end)
+
+    cond do
+      ok ->
+        {client, _} = ok
+        shell.info("\n  → Working strategy: #{client}")
+
+      partial ->
+        {client, verdict} = partial
+
+        shell.info("\n  → Best available: #{client} — #{verdict}")
+
+        shell.info(
+          "    Some segments failed. ffmpeg retries and skips these, so mpv usually\n" <>
+            "    plays anyway; VLC's adaptive demuxer can drop the whole input. If\n" <>
+            "    playback dies immediately, try `player = mpv` in config.env."
+        )
+
+      true ->
+        shell.info("\n  → No strategy produced fetchable streams. Paste this output back.")
     end
   end
 
@@ -594,12 +633,8 @@ defmodule Mix.Tasks.Playmark.Debug do
             {client, "no URLs"}
 
           urls ->
-            statuses = Enum.map(urls, &probe(&1, shell))
-
-            verdict =
-              if Enum.all?(statuses, &(&1 in 200..299)),
-                do: "OK (#{Enum.join(statuses, ",")})",
-                else: "FAIL (#{Enum.join(statuses, ",")})"
+            probes = Enum.map(urls, &probe(&1, shell))
+            verdict = verdict(probes)
 
             shell.info("  verdict: #{verdict}\n")
             {client, verdict}
@@ -616,6 +651,90 @@ defmodule Mix.Tasks.Playmark.Debug do
     end
   end
 
+  @doc """
+  Whether a fetched body is an HLS playlist.
+
+  Every playlist opens with `#EXTM3U`, so that is the whole test. Exposed for
+  testing.
+  """
+  def hls_manifest?(body) when is_binary(body) do
+    String.starts_with?(String.trim_leading(body), "#EXTM3U")
+  end
+
+  def hls_manifest?(_body), do: false
+
+  @doc """
+  The segment URLs in an HLS playlist, in order.
+
+  Only absolute URLs are returned. YouTube's playlists always carry absolute
+  segment URLs, so resolving relative URIs against a base is deliberately not
+  implemented — a playlist using them reports zero segments, which the caller
+  surfaces as a count rather than as a pass. Exposed for testing.
+  """
+  def parse_hls_segments(body) when is_binary(body) do
+    if hls_manifest?(body) do
+      body
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.filter(&String.starts_with?(&1, "http"))
+    else
+      []
+    end
+  end
+
+  def parse_hls_segments(_body), do: []
+
+  @doc """
+  Turns probe results into a one-line verdict.
+
+  A probe is `%{status: integer | :error, segments: nil | [integer | :error]}`,
+  where `segments` is `nil` for a URL that was not an HLS playlist.
+
+  `PARTIAL` exists because a manifest can serve perfectly while some of its
+  segments 403. ffmpeg tolerates that — it retries and skips, so mpv plays —
+  while VLC's `adaptive` demuxer can fail the whole input. Reporting that as
+  either OK or FAIL would hide the distinction that matters when choosing a
+  player. Exposed for testing.
+  """
+  def verdict(probes) when is_list(probes) do
+    statuses = Enum.map(probes, & &1.status)
+
+    if Enum.all?(statuses, &ok_status?/1) do
+      segment_verdict(statuses, Enum.find(probes, &is_list(&1.segments)))
+    else
+      "FAIL (#{Enum.map_join(statuses, ",", &status_label/1)})"
+    end
+  end
+
+  defp segment_verdict(statuses, nil),
+    do: "OK (#{Enum.map_join(statuses, ",", &status_label/1)})"
+
+  # A playlist we could not read segment URLs out of tells us nothing about
+  # playability, so it is not a pass.
+  defp segment_verdict(_statuses, %{segments: []}), do: "FAIL (no segments parsed)"
+
+  defp segment_verdict(statuses, %{segments: segments}) do
+    failed = Enum.count(segments, &(not ok_status?(&1)))
+    total = length(segments)
+
+    cond do
+      failed == 0 ->
+        "OK (#{Enum.map_join(statuses, ",", &status_label/1)}, #{total}/#{total} segments)"
+
+      failed == total ->
+        "FAIL (#{failed}/#{total} segments failed)"
+
+      true ->
+        "PARTIAL (#{failed}/#{total} segments failed)"
+    end
+  end
+
+  defp ok_status?(status) when is_integer(status), do: status in 200..299
+  defp ok_status?(_status), do: false
+
+  defp status_label(:error), do: "ERR"
+  defp status_label(status), do: to_string(status)
+
   defp client_args("default" <> _), do: []
 
   defp client_args(client),
@@ -627,27 +746,101 @@ defmodule Mix.Tasks.Playmark.Debug do
   end
 
   # Probe a stream URL the way VLC does: a ranged GET with VLC's User-Agent,
-  # following redirects. Report the final HTTP status.
+  # following redirects.
+  #
+  # A reachable URL is not the same as a playable one. When the URL turns out to
+  # be an HLS playlist, the manifest serving 200 says nothing about its segments —
+  # which is exactly where YouTube's 403s land. So a playlist is read and its
+  # first few segments fetched for real. Returns
+  # `%{status: integer | :error, segments: nil | [integer | :error]}`.
   defp probe(url, shell) do
-    label = url |> String.slice(0, 70)
+    label = String.slice(url, 0, 70)
 
-    result =
-      Req.get(url,
-        headers: [{"user-agent", @vlc_user_agent}, {"range", "bytes=0-1"}],
-        redirect: true,
-        retry: false,
-        receive_timeout: 15_000,
-        decode_body: false
-      )
-
-    case result do
-      {:ok, %Req.Response{status: status}} ->
+    case request(url, "bytes=0-1") do
+      {:ok, status, _bytes} ->
         shell.info("    [#{status}] #{label}...")
-        status
+        %{status: status, segments: maybe_probe_segments(url, status, shell)}
 
       {:error, reason} ->
         shell.info("    [ERR] #{label}... (#{inspect(reason)})")
+        %{status: :error, segments: nil}
+    end
+  end
+
+  defp maybe_probe_segments(url, status, shell) do
+    with true <- ok_status?(status),
+         {:ok, body} <- fetch_body(url),
+         true <- hls_manifest?(body) do
+      segments = parse_hls_segments(body)
+      sample = Enum.take(segments, @segment_sample)
+
+      shell.info(
+        "    HLS playlist: #{length(segments)} segments, fetching #{length(sample)}" <>
+          " (a sample, not a full playback)"
+      )
+
+      sample
+      |> Enum.with_index()
+      |> Enum.map(fn {segment, index} -> probe_segment(segment, index, shell) end)
+    else
+      _not_hls -> nil
+    end
+  end
+
+  # Segments are fetched whole and in order, because that is how a player reads
+  # them. A single ranged request is a poor proxy and can report failures a real
+  # player never sees.
+  defp probe_segment(url, index, shell) do
+    case request(url, nil) do
+      {:ok, status, bytes} ->
+        shell.info("      seg #{index}: [#{status}] #{kb(bytes)}")
+        status
+
+      {:error, reason} ->
+        shell.info("      seg #{index}: [ERR] (#{inspect(reason)})")
         :error
     end
   end
+
+  # Always `{:ok, status, bytes}` or `{:error, reason}` — one shape, so callers
+  # can't miss a clause. `bytes` is 0 when the response carried no body.
+  defp request(url, range) do
+    headers = [{"user-agent", @vlc_user_agent}] ++ if(range, do: [{"range", range}], else: [])
+
+    case Req.get(url,
+           headers: headers,
+           redirect: true,
+           retry: false,
+           receive_timeout: 20_000,
+           decode_body: false
+         ) do
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:ok, status, if(is_binary(body), do: byte_size(body), else: 0)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp fetch_body(url) do
+    case Req.get(url,
+           headers: [{"user-agent", @vlc_user_agent}],
+           redirect: true,
+           retry: false,
+           receive_timeout: 20_000,
+           decode_body: false
+         ) do
+      {:ok, %Req.Response{status: status, body: body}}
+      when status in 200..299 and is_binary(body) ->
+        {:ok, body}
+
+      _other ->
+        :error
+    end
+  end
+
+  defp kb(bytes) when bytes >= 1_048_576,
+    do: "#{:erlang.float_to_binary(bytes / 1_048_576, decimals: 1)} MB"
+
+  defp kb(bytes), do: "#{div(bytes, 1024)} KB"
 end

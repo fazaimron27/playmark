@@ -4,14 +4,14 @@ A terminal UI for playing video without leaving your terminal — bookmark
 YouTube videos, subscribe to channels, save playlists, search or explore YouTube,
 and browse local directories, then play any of it in your media player. Metadata is
 fetched without any API key (via the public oEmbed endpoint), streams are
-resolved with `yt-dlp`, and playback hands off to `vlc`, `mpv`, or `ffplay`.
+resolved with `yt-dlp`, and playback hands off to `mpv`, `vlc`, or `ffplay`.
 
 ## Requirements
 
 - Elixir 1.18+ / Erlang OTP 26+
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on your `PATH`
-- A media player on your `PATH`: [`vlc`](https://www.videolan.org/vlc/) (default),
-  [`mpv`](https://mpv.io), or [`ffplay`](https://ffmpeg.org/ffplay.html)
+- A media player on your `PATH`: [`mpv`](https://mpv.io) (default),
+  [`vlc`](https://www.videolan.org/vlc/), or [`ffplay`](https://ffmpeg.org/ffplay.html)
 
 playmark checks for `yt-dlp` and the configured player on startup and exits with
 a helpful message if either is missing.
@@ -37,7 +37,7 @@ setting uses its default.
 
 ```sh
 # ~/.config/playmark/config.env
-player = vlc              # vlc (default), mpv, or ffplay
+player = mpv              # mpv (default), vlc, or ffplay
 max_height = 1080         # cap playback resolution (video height in pixels)
 subtitles = true          # show captions (default true)
 subtitle_default = en     # first-choice caption language (default en)
@@ -58,11 +58,29 @@ default stands, so a typo won't stop the app from starting.
 
 ### Choosing a player
 
-Playback defaults to VLC. Set `player = mpv` to let mpv drive `yt-dlp` itself and
-handle HLS/muxing natively. VLC and ffplay cannot fetch YouTube pages, so playmark
-resolves stream URLs with `yt-dlp -g` first. ffplay uses one muxed stream and does
-not support playmark's downloaded YouTube captions or playback resume tracking.
-mpv and VLC track seekable videos and local files through their control sockets.
+Playback defaults to **mpv**, for two reasons.
+
+First, robustness. YouTube intermittently returns `HTTP 403` for individual HLS
+segments. mpv hands the stream to ffmpeg, which retries and skips a bad segment
+and keeps playing. VLC's own demuxer probes the *first* segment to work out the
+container format, so a single failed segment used to abort the whole video — it
+would open and immediately close. playmark now forces ffmpeg's demuxer on VLC's
+streaming path to get the same tolerance, but mpv needs no mitigation.
+
+Second, precision. mpv reports its exact position and end-of-file over JSON IPC,
+so resume checkpoints and "did this finish?" are known rather than inferred. VLC
+is polled over its RC interface and completion is estimated from how close the
+final position was to the duration.
+
+The other two still work:
+
+- **vlc** — cannot fetch YouTube pages, so playmark resolves stream URLs with
+  `yt-dlp -g` first. Tracks position for resume, and can be replaced mid-playback.
+- **ffplay** — the no-extra-install tier, since it ships with FFmpeg. Uses one
+  muxed stream, and has no control interface: no captions, no resume tracking, and
+  it can't be replaced by starting another video.
+
+Set `player = vlc` or `player = ffplay` in `config.env` to switch.
 
 ## Usage
 
@@ -189,11 +207,29 @@ report a field shows a blank cell. Local folders instead show Name and Type.
   from when already at its root. Returning to a parent restores its cursor and
   filter exactly.
 
-The player returns to the list or overlay it was launched from when the video
-ends; queued playback advances to the next item. Network, shell, and playback
-work runs in background tasks so the UI never freezes. Fetching and loading can
-be canceled with `Esc`; during playback, close the external player to return
-(`Q` remains available to inspect the queue).
+Network, shell, and playback work runs in background tasks so the UI never
+freezes. Fetching and loading can be canceled with `Esc`.
+
+Playback does not take over the app. While the stream is being resolved and
+captions fetched, the screen shows a step-by-step panel — that takes real time
+(YouTube metadata is slow: tens of seconds is normal, longer on a cold cache), so
+`Esc` cancels and takes you back without ever starting the player. Once the player
+is actually up, you get the list back and keep browsing — a one-line strip above
+the footer names what is playing. From there:
+
+- `Enter` on another video **replaces** the running one, saving your position in
+  the video you left. This needs a control connection to the player, so it works
+  on `mpv` and `vlc`; on `ffplay` a second play is refused with a hint to queue it
+  instead.
+- `Enter` on the video already playing does nothing but say so.
+- `X` stops the player and stays in playmark, saving your position. Like takeover
+  this needs a control connection, so `ffplay` reports that it can't be stopped.
+- `q` quits as usual, stopping the player on the way out and saving your position
+  first. It doesn't ask — `X` is the key for stopping without leaving.
+
+When the video ends on its own it leaves you where you are — playback is a
+background activity, so finishing never moves the cursor or closes an overlay you
+opened meanwhile. Queued playback advances to the next item in the background.
 
 ### Explore
 
@@ -254,25 +290,26 @@ results, or a local folder):
 - `n` — queue the selected item to play next, right after the current head,
   instead of at the tail (same lists as `e`)
 
-Open the queue manager with `Q` from any list, Search or Explore results, or even
-over a running player (`Q` is the only key playback accepts). In the queue
-manager:
+Open the queue manager with `Q` from any list, Search or Explore results, or while
+a video is playing. In the queue manager:
 
 - `j` / `k` — move the selection
 - `[` / `]` — move the selected item up / down in play order
 - `d` — remove the selected item (`y` confirms, any other key cancels)
 - `c` — clear the whole queue (`y` confirms, any other key cancels)
-- `Enter` — start playing from the top (unavailable when the manager is opened
-  over an active player)
+- `Enter` — start playing from the top. With a player already running this goes
+  through the ordinary takeover path, replacing it.
 - `Esc` — close the manager, back to where you opened it from
 - `q` — quit playmark
 
 Once playback starts from the queue, it auto-advances: each completed item is
 dropped and the next one starts automatically — one player at a time, never two
 at once. Closing mpv or VLC before the end saves progress, keeps that item, and
-stops in the queue manager. If an item fails to play, the queue likewise stops
-and keeps the remaining items intact. ffplay cannot distinguish a manual close
-from EOF, so its clean exits retain the older remove-and-advance behavior.
+stops the queue with the reason in the footer — it does not pull the queue
+manager open over whatever you were browsing. If an item fails to play, the queue
+likewise stops and keeps the remaining items intact. ffplay cannot distinguish a
+manual close from EOF, so its clean exits retain the older remove-and-advance
+behavior.
 
 ### History
 
@@ -284,12 +321,15 @@ moves it back to the top rather than adding a duplicate.
 
 For mpv and VLC, playmark also checkpoints the position of finite, seekable media
 after the first 10 seconds. Playing the same YouTube video or local path again
-prompts to resume, start over, or cancel. Checkpoints are cleared at EOF or near
-the final 30 seconds, and are updated periodically so they survive an application
-or player interruption. Live/non-seekable media and ffplay are not checkpointed.
+prompts to resume, start over, or cancel — except from the queue, which honours a
+checkpoint silently rather than interrupting unattended playback with a question.
+Checkpoints are cleared at EOF or near the final 30 seconds, and are updated
+periodically so they survive an application or player interruption. Replacing a
+playing video, and quitting with `q`, both checkpoint the video you left.
+Live/non-seekable media and ffplay are not checkpointed.
 
-Open history with `H` from any list, including Search and Explore results (not
-over a running player). In the History overlay:
+Open history with `H` from any list, including Search and Explore results or while
+a video is playing. In the History overlay:
 
 - `j` / `k` — move the selection
 - `Enter` — replay the selected entry

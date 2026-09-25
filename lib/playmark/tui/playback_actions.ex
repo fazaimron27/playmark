@@ -15,6 +15,27 @@ defmodule Playmark.TUI.PlaybackActions do
   here, to `handle_progress/2` and `handle_result/2`. Position checkpoints are
   written from inside that task so they never block the runtime.
 
+  ## Playback is a background activity
+
+  `:playing` is a *preparation* mode, not a terminal one. It locks input only
+  while the stream resolves and captions download; once the player is up,
+  `handle_progress/2` restores the browse mode while `state.playing` stays
+  populated. "A player is running" and "the TUI is locked" are therefore separate
+  facts, which is what lets the user keep browsing.
+
+  The player is up when two things have happened: the backend reported the
+  `:playing` stage, and `Playmark.Player.Control` settled whether its socket
+  exists (`playing.control` leaves `:pending`). Both are required because the
+  backends report `:playing` *before* `Control.run/4` opens the port, so that
+  stage alone does not mean a quit can be delivered — and takeover depends on it.
+
+  Starting a play while one runs replaces it: `launch_play/6` asks the outgoing
+  player to quit, which makes `Control` classify it as stopped and write its
+  resume checkpoint. The stop lives there rather than in `start_play/4` because a
+  resume prompt sits between the two, and cancelling that prompt must not have
+  killed anything. A player with no control socket (ffplay, or a socket that never
+  came) refuses takeover instead — see `takeover/2`.
+
   `Playmark.Player.Playback` is called two ways here. Its IO goes through
   `Playmark.TUI.Impl.playback/0` so tests can stub it; its config reads are
   called on the real module directly, because a stub implements only the IO
@@ -34,6 +55,104 @@ defmodule Playmark.TUI.PlaybackActions do
   @minimum_resume_ms 10_000
   @completion_window_ms 30_000
 
+  # How long the quit path waits for the player to report its exit. See
+  # stop_player/1 — this bounds the one place we block the runtime on purpose.
+  @stop_timeout_ms 3_000
+
+  # --- stopping on the way out ---------------------------------------------
+
+  @doc """
+  Abandons a play that is still preparing, releasing the UI.
+
+  Preparation is not the brief wait it was once documented as: on VLC with
+  captions on it is a `yt-dlp -g` resolve, a `yt-dlp -J` probe, a caption fetch,
+  and a socket connect — tens of seconds on one measured video, and over a minute
+  when the probe was cold. Every key was dropped for that whole window, so `Esc`
+  cancels it like every other loading mode in the app.
+
+  Cancel means *stop waiting*, not *kill*: a `System.cmd` child outlives its
+  killed `Task` (verified), so the yt-dlp process runs to completion and dies
+  writing to a closed pipe. Clearing `playing` makes the ref guards in
+  `handle_progress/2` and `handle_result/2` drop whatever it eventually reports —
+  the same trade the `:fetching` / `:loading` modes already make.
+
+  The stop message is what keeps a cancelled play from launching at all. The task
+  is blocked in `System.cmd` and cannot act on it there, so both launch points
+  read the mailbox immediately before starting a player
+  (`Playmark.Player.Playback.stop_requested?/0`) and return without one. A stop
+  landing after that check is still honoured by `Control`'s monitor loop, as
+  before.
+
+  A queued item is deliberately *not* removed and the queue does not advance:
+  cancelling is not completing.
+  """
+  def cancel_play(%{mode: :playing, playing: playing} = state) when is_map(playing) do
+    send_stop(playing)
+
+    %{
+      state
+      | mode: play_return_mode(state),
+        playing: nil,
+        status: {:info, "Canceled"}
+    }
+  end
+
+  def cancel_play(state), do: state
+
+  @doc """
+  Asks the running player to stop, leaving the TUI running.
+
+  Unlike `stop_player/1` this does not wait: the TUI stays up, so the playback
+  task delivers its `{:play_result, …}` normally and `handle_result/2` clears
+  `playing` and writes the checkpoint. `playing` is deliberately *not* cleared
+  here — the player is still up until it actually exits, and claiming otherwise
+  would blank the strip while the video is still on screen.
+
+  A player with no control socket can't be asked, so it reports instead of
+  pretending — same rule as `takeover/2`.
+  """
+  def stop_playing(%{playing: %{control: :ready}} = state) do
+    stop_current(state)
+    %{state | status: {:info, "Stopping playback…"}}
+  end
+
+  def stop_playing(%{playing: %{player: player}} = state),
+    do: %{state | status: {:error, "#{player} can't be interrupted"}}
+
+  def stop_playing(state), do: state
+
+  @doc """
+  Stops the running player, waits briefly for it to report, and clears it.
+
+  Called straight from `q`, without a confirmation: `X` (`stop_playing/1`) is the
+  key whose job is stopping playback, and prompting here would duplicate it while
+  offering a choice that isn't real — the player goes down with the VM either way.
+  What the wait buys is the *position*, not the choice.
+
+  This is the one place the TUI blocks its own runtime on purpose. The resume
+  checkpoint is written *inside* the playback task (see
+  `Playmark.Player.Control.finish/2`), so returning immediately would let the VM
+  halt before that write lands and silently lose the user's position. The wait is
+  bounded, so a player that ignores `quit` delays the exit by at most
+  #{@stop_timeout_ms}ms instead of hanging it. Defensible only because the UI is
+  about to disappear anyway.
+  """
+  def stop_player(%{playing: %{ref: ref}} = state) do
+    stop_current(state)
+    await_stop(ref)
+    %{state | playing: nil}
+  end
+
+  def stop_player(state), do: %{state | playing: nil}
+
+  defp await_stop(ref) do
+    receive do
+      {:play_result, ^ref, _result} -> :ok
+    after
+      @stop_timeout_ms -> :ok
+    end
+  end
+
   # --- the resume prompt ---------------------------------------------------
 
   @doc """
@@ -51,12 +170,13 @@ defmodule Playmark.TUI.PlaybackActions do
   end
 
   def handle_resume_key("esc", %{resume: pending} = state) when is_map(pending) do
+    # `playing` is untouched: a player may still be running behind this prompt,
+    # and cancelling a *different* video's resume must not disturb it.
     {:noreply,
      %{
        state
        | mode: pending.display_mode,
          resume: nil,
-         playing: nil,
          status: {:info, "Canceled"}
      }}
   end
@@ -72,25 +192,65 @@ defmodule Playmark.TUI.PlaybackActions do
   exactly where the play was requested.
   """
   def start_play(playable, origin, state, queue_id \\ nil) do
+    case takeover(state, playable) do
+      {:refuse, message} -> %{state | status: {:error, message}}
+      :ok -> start_playable(playable, origin, state, queue_id)
+    end
+  end
+
+  # What a play request means when a player is already running. Decided here,
+  # before the resume prompt, so a refusal never arrives *after* a question — and
+  # before any stop is sent, so cancelling the prompt leaves the player alone.
+  #
+  # Replacing a video with itself would read its own checkpoint, stop it (writing
+  # a fresh one), then start from the stale position, so it is refused outright
+  # rather than ordered around.
+  defp takeover(%{playing: nil}, _playable), do: :ok
+  defp takeover(%{playing: %{url: url}}, %{url: url}), do: {:refuse, "Already playing"}
+  defp takeover(%{playing: %{control: :ready}}, _playable), do: :ok
+
+  defp takeover(%{playing: %{player: player}}, _playable),
+    do: {:refuse, "#{player} can't be interrupted — press e to queue"}
+
+  defp takeover(_state, _playable), do: :ok
+
+  defp start_playable(playable, origin, state, queue_id) do
     play = Impl.playback()
     return_mode = return_mode(origin, state)
+    checkpoint = resume_checkpoint(play, playable.url)
 
-    case resume_checkpoint(play, playable.url) do
-      nil ->
+    cond do
+      is_nil(checkpoint) ->
         launch_play(playable, origin, state, queue_id, return_mode, nil)
 
-      checkpoint ->
+      # The queue never stops to ask. It is unattended sequential playback, so a
+      # modal prompt — whether from `Enter` in the modal or from an auto-advance
+      # landing while the user browses — would steal focus from whatever is on
+      # screen. A checkpoint is simply honoured.
+      origin == :queue ->
+        launch_play(
+          playable,
+          origin,
+          state,
+          queue_id,
+          return_mode,
+          checkpoint.resume_position_ms
+        )
+
+      true ->
         pending = %{
           playable: playable,
           origin: origin,
           queue_id: queue_id,
           return_mode: return_mode,
-          display_mode: resume_display_mode(origin, state),
+          display_mode: state.mode,
           position_ms: checkpoint.resume_position_ms,
           duration_ms: checkpoint.duration_ms
         }
 
-        %{state | mode: :resume, resume: pending, playing: nil, status: nil}
+        # `playing` is deliberately left as-is: a player may still be running
+        # behind this prompt, and answering Esc must leave it untouched.
+        %{state | mode: :resume, resume: pending, status: nil}
     end
   end
 
@@ -100,6 +260,11 @@ defmodule Playmark.TUI.PlaybackActions do
   # back to handle_info/2. `parent` is captured here, which still runs in the
   # runtime process — this is reached synchronously from handle_event/2.
   defp launch_play(playable, origin, state, queue_id, return_mode, start_position_ms) do
+    # The outgoing player goes down here rather than in start_play/4, because
+    # this is the point where a play actually commits. A resume prompt sits
+    # between the two, and cancelling it must not have killed anything.
+    stop_current(state)
+
     parent = self()
     play = Impl.playback()
     player = play.player()
@@ -154,10 +319,18 @@ defmodule Playmark.TUI.PlaybackActions do
       ref: playback_ref,
       task_pid: task_pid,
       title: playable.title,
+      # Carried for the now-playing strip, which names the channel alongside the
+      # title. Best-effort, exactly like the player's artist metadata.
+      author: Map.get(playable, :author),
+      url: url,
       player: player,
       resume_position_ms: start_position_ms,
       steps: play_steps(player, local?),
       stage: :starting,
+      # Whether this player can be asked to quit over a control socket, which is
+      # what takeover needs. `:pending` until Control reports (mpv/VLC), `:none`
+      # for a player that has no control interface. See seed_control/1.
+      control: seed_control(player),
       stream: stream_plan(player, local?),
       captions: captions_plan(player, local?),
       # Chapter count, filled in from the caption probe's {:chapters, n} report
@@ -170,6 +343,24 @@ defmodule Playmark.TUI.PlaybackActions do
 
     %{state | mode: :playing, playing: playing, resume: nil, status: nil}
   end
+
+  # Asks the currently running player to exit, if there is one and it can be
+  # asked. `send/2` to a finished task is a silent no-op, so this stays safe when
+  # the play has already ended. An uncontrollable player is never reached here —
+  # takeover/2 refuses those before a launch commits.
+  defp stop_current(%{playing: %{control: :ready} = playing}), do: send_stop(playing)
+  defp stop_current(_state), do: :ok
+
+  # The bare send, with no `control` requirement. `stop_current/1` gates on
+  # `:ready` because a player that reported `:none` has no socket to write to; a
+  # *preparing* play is `:pending`, where the message is speculative on purpose —
+  # it is only read if the player gets far enough to start monitoring.
+  defp send_stop(%{task_pid: pid}) when is_pid(pid) do
+    send(pid, :playmark_stop)
+    :ok
+  end
+
+  defp send_stop(_playing), do: :ok
 
   defp launch_pending_resume(state, start_position_ms) do
     pending = state.resume
@@ -197,9 +388,6 @@ defmodule Playmark.TUI.PlaybackActions do
       end
     end
   end
-
-  defp resume_display_mode(:queue, _state), do: :queue_manage
-  defp resume_display_mode(_origin, state), do: state.mode
 
   # A history write must never interrupt playback, so any raise or exit is
   # swallowed. Every caller is in this module.
@@ -291,12 +479,61 @@ defmodule Playmark.TUI.PlaybackActions do
     {:noreply, %{state | playing: %{playing | chapters: count}}}
   end
 
+  # Control reports whether the player's socket came up (`:ready`) or that the
+  # connect deadline passed / the socket dropped (`:none`). Either settles
+  # controllability, so either may unlock browsing.
+  def handle_progress(
+        {:play_progress, ref, {:control, control}},
+        %{playing: %{ref: ref} = playing} = state
+      )
+      when control in [:ready, :none] do
+    {:noreply, maybe_unlock(%{state | playing: %{playing | control: control}})}
+  end
+
   def handle_progress({:play_progress, ref, stage}, %{playing: %{ref: ref} = playing} = state)
       when is_map(playing) and is_atom(stage) do
-    {:noreply, %{state | playing: %{playing | stage: stage}}}
+    {:noreply, maybe_unlock(%{state | playing: %{playing | stage: stage}})}
   end
 
   def handle_progress({:play_progress, _ref, _stage}, state), do: {:noreply, state}
+
+  # `:playing` is a *preparation* mode: it locks input only while the player is
+  # starting. Once the player is up — the `:playing` stage reported and its
+  # controllability settled — the browse mode is restored while `playing` stays
+  # populated, so the user keeps browsing with the player running.
+  #
+  # `:pending` is what we wait for: takeover needs a socket to deliver `quit` on,
+  # and until Control reports we don't know whether there is one. Unlocking early
+  # would leave a window where replacing the video silently does nothing.
+  #
+  # Guarded on `mode: :playing` so a late report can't yank a user who has since
+  # navigated elsewhere back to the mode the play started from.
+  defp maybe_unlock(
+         %{mode: :playing, playing: %{stage: :playing, control: control} = playing} = state
+       )
+       when control != :pending do
+    %{state | mode: unlock_mode(playing)}
+  end
+
+  defp maybe_unlock(state), do: state
+
+  # Where browsing resumes. The `:playing` clause is a floor against relocking the
+  # TUI with a live player and no key that works. No live path reaches it: a return
+  # mode of `:playing` could only come from an overlay opened *during* preparation
+  # saving it, and preparation now accepts no keys at all. Kept because it costs
+  # one line and the cost of being wrong is an unrecoverable UI.
+  defp unlock_mode(%{return_mode: :playing}), do: :list
+  defp unlock_mode(%{return_mode: return_mode}), do: return_mode
+  defp unlock_mode(_playing), do: :list
+
+  # Whether a player can be asked to quit over a control socket. mpv and VLC go
+  # through Playmark.Player.Control, which reports when its socket is up (or that
+  # it never came); ffplay has no control interface at all, so it is
+  # uncontrollable from the start. Anything unrecognised is assumed
+  # uncontrollable — refusing takeover is recoverable, waiting forever for a
+  # report that never arrives is not.
+  defp seed_control(player) when player in [:mpv, :vlc], do: :pending
+  defp seed_control(_player), do: :none
 
   @doc """
   Commits the external player's exit, called from `Playmark.TUI.handle_info/2`.
@@ -336,10 +573,8 @@ defmodule Playmark.TUI.PlaybackActions do
     {:noreply,
      %{
        state
-       | mode: :queue_manage,
-         queue_return: Map.get(state.playing, :return_mode, :list),
+       | mode: play_return_mode(state),
          queue: Queue.list_items(),
-         queue_selected: 0,
          playing: nil,
          status: {:info, "Playback stopped; progress saved"}
      }}
@@ -354,7 +589,9 @@ defmodule Playmark.TUI.PlaybackActions do
   end
 
   # A queued item failed: stop the queue and surface the error, leaving the failed
-  # item in place so it is visible where playback stopped.
+  # item in place so it is visible where playback stopped. The mode returns to
+  # where browsing was rather than forcing the queue modal open — playback is a
+  # background activity now, and popping a modal would interrupt the user.
   def handle_result(
         {:play_result, ref, {:error, reason}},
         %{playing: %{ref: ref, origin: :queue}} = state
@@ -364,10 +601,8 @@ defmodule Playmark.TUI.PlaybackActions do
     {:noreply,
      %{
        state
-       | mode: :queue_manage,
-         queue_return: Map.get(state.playing, :return_mode, :list),
+       | mode: play_return_mode(state),
          queue: Queue.list_items(),
-         queue_selected: 0,
          playing: nil,
          status: {:error, "Playback failed: #{reason}"}
      }}
@@ -390,15 +625,20 @@ defmodule Playmark.TUI.PlaybackActions do
 
   def handle_result({:play_result, _ref, _result}, state), do: {:noreply, state}
 
-  defp complete_queued_play(%{playing: %{queue_id: id}} = state) do
+  defp complete_queued_play(%{playing: %{queue_id: id} = playing} = state) do
     Queue.remove_by_id(id)
     queue = Queue.list_items()
-    state = %{state | queue: queue}
+
+    # This play is over, so clear it before advancing: the next item is a fresh
+    # launch, not a takeover of a player that has already exited. Its return mode
+    # moves to `queue_return`, which is where return_mode/2 reads it from once
+    # `playing` is gone — otherwise a chain would forget where it started.
+    return_mode = Map.get(playing, :return_mode, :list)
+    state = %{state | queue: queue, playing: nil, queue_return: return_mode}
 
     case Queue.head() do
       nil ->
-        return_mode = Map.get(state.playing, :return_mode, :list)
-        %{state | mode: return_mode, playing: nil, status: {:info, "Queue finished"}}
+        %{state | mode: finished_mode(state, return_mode), status: {:info, "Queue finished"}}
 
       item ->
         playable = %{title: item.title, url: item.url, local: item.local, author: item.author}
@@ -419,12 +659,24 @@ defmodule Playmark.TUI.PlaybackActions do
   defp return_mode(:list, %{mode: :videos}), do: :videos
   defp return_mode(_origin, _state), do: :list
 
-  # Where a finished play lands. `return_mode/2` above picks this at launch and
-  # records it on the playing map, so the first clause is the real path; the
-  # remaining two keep older/forced test states safe. The second reads `videos`,
-  # a browse-core key — a legacy fallback, kept adjacent to the function it
-  # duplicates rather than merged into it, which would be a rewrite.
-  defp play_return_mode(%{playing: %{return_mode: return_mode}}), do: return_mode
-  defp play_return_mode(%{videos: videos}) when videos != [], do: :videos
-  defp play_return_mode(_state), do: :list
+  # Where a finished play lands. Only meaningful while the TUI is still locked in
+  # `:playing` — i.e. the player never came up, so the mode was never released
+  # somewhere. Once the player was up the user is already browsing, and a play
+  # finishing must not move them: playback is a background activity.
+  #
+  # `return_mode/2` picks the locked-case target at launch and records it on the
+  # playing map, so the first clause is the real path; the second reads `videos`,
+  # a browse-core key — a legacy fallback for older/forced test states, kept
+  # adjacent to the function it duplicates rather than merged into it.
+  defp play_return_mode(%{mode: :playing, playing: %{return_mode: return_mode}}),
+    do: return_mode
+
+  defp play_return_mode(%{mode: :playing, videos: videos}) when videos != [], do: :videos
+  defp play_return_mode(%{mode: :playing}), do: :list
+  defp play_return_mode(%{mode: mode}), do: mode
+
+  # Same rule for a drained queue, except `playing` has already been cleared by
+  # the time we get here, so the target is passed in rather than read off it.
+  defp finished_mode(%{mode: :playing}, return_mode), do: return_mode
+  defp finished_mode(%{mode: mode}, _return_mode), do: mode
 end

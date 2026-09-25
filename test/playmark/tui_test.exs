@@ -58,6 +58,10 @@ defmodule Playmark.TUITest.TestLocalFiles do
   the test process (handing it the task pid) and blocks until the test sends the
   entries to return, so a test can observe the non-blocking `:loading` state before
   the list arrives — mirroring `TestChannel`.
+
+  `delete/2` blocks the same way, announcing with a `{:delete, path}` tag so a test
+  can tell the delete apart from the re-read that follows it — the two calls share
+  one task, and this is how the test drives them one at a time.
   """
 
   def list_entries(dir, _root) do
@@ -70,6 +74,18 @@ defmodule Playmark.TUITest.TestLocalFiles do
       {:files, files} -> {:ok, files}
     after
       5_000 -> {:ok, []}
+    end
+  end
+
+  def delete(path, _root) do
+    test_pid = Application.get_env(:playmark, :test_local_files_pid)
+    send(test_pid, {__MODULE__, self(), {:delete, path}})
+
+    receive do
+      {:result, result} -> result
+      :ok -> :ok
+    after
+      5_000 -> :ok
     end
   end
 end
@@ -591,10 +607,10 @@ defmodule Playmark.TUITest do
   end
 
   describe "playback flow" do
-    test "Enter on a bookmark enters :playing mode without blocking" do
+    test "Enter on a bookmark starts playback and unlocks browsing" do
       # Stub the player so the suite never spawns a real player or hits the
       # network. The stub blocks until released, modelling a player the user
-      # hasn't closed yet, so we can observe the non-blocking :playing state.
+      # hasn't closed yet, so we can observe the running-but-unlocked state.
       test_pid = self()
       Application.put_env(:playmark, :playback_impl, TestPlayback)
       Application.put_env(:playmark, :test_playback_pid, test_pid)
@@ -605,10 +621,18 @@ defmodule Playmark.TUITest do
 
       press(pid, "enter")
 
+      # The stub reports :playing from inside its task before announcing itself,
+      # so receiving this proves that report is already queued on the runtime —
+      # the mode asserted below is settled rather than racing.
+      assert_receive {TestPlayback, play_task}, 1_000
+
       # The runtime must return immediately (playback runs in a task), so this
       # call would time out if handle_event were blocked on the player.
       state = user_state(pid)
-      assert state.mode == :playing
+      # The stub is not a recognised player, so it is uncontrollable and unlocks
+      # as soon as it is up: browsing resumes with the player still running.
+      assert state.mode == :list
+      assert state.playing.control == :none
       # The step-by-step panel is seeded from the selected item and player; the
       # status line is cleared since the panel now carries the detail.
       assert state.status == nil
@@ -616,7 +640,6 @@ defmodule Playmark.TUITest do
       assert :playing in steps
 
       # Release the stubbed player so its task can finish cleanly.
-      assert_receive {TestPlayback, play_task}, 1_000
       send(play_task, :close)
     end
 
@@ -637,9 +660,10 @@ defmodule Playmark.TUITest do
       refute_receive {TestPlayback, _task}, 50
 
       press(pid, "y")
-      assert user_state(pid).mode == :playing
       assert_receive {TestPlayback, play_task}, 1_000
       assert_receive {TestPlayback, :start_position, 125_000}, 1_000
+      assert user_state(pid).mode == :list
+      refute is_nil(user_state(pid).playing)
       send(play_task, :close)
     end
 
@@ -654,10 +678,10 @@ defmodule Playmark.TUITest do
       press(pid, "enter")
       press(pid, "n")
 
-      assert user_state(pid).mode == :playing
-      assert History.get_checkpoint(url) == nil
       assert_receive {TestPlayback, play_task}, 1_000
       assert_receive {TestPlayback, :start_position, nil}, 1_000
+      assert user_state(pid).mode == :list
+      assert History.get_checkpoint(url) == nil
       send(play_task, :close)
     end
 
@@ -713,9 +737,9 @@ defmodule Playmark.TUITest do
 
       press(pid, "enter")
 
-      assert user_state(pid).mode == :playing
       assert_receive {TestPlayback, play_task}, 1_000
       assert_receive {TestPlayback, :start_position, nil}, 1_000
+      assert user_state(pid).mode == :list
       send(play_task, :close)
     end
 
@@ -757,16 +781,21 @@ defmodule Playmark.TUITest do
       assert user_state(pid).mode == :list
     end
 
-    test "non-Q keys are ignored while playing" do
+    # Preparation is a brief, uninterruptible wait: yt-dlp resolving and the
+    # caption download, then the socket report that unlocks browsing. `Q` used to
+    # be accepted here because it was the only key that worked during playback at
+    # all; now that browsing returns on its own, opening the queue over a sliver
+    # of startup serves no purpose.
+    test "no keys are accepted while the player is starting" do
       Repo.insert!(%Bookmark{url: "https://youtu.be/play", title: "V", channel: "C"})
       pid = start_tui()
 
       :sys.replace_state(pid, fn s -> %{s | user_state: %{s.user_state | mode: :playing}} end)
 
-      press(pid, "a")
-      press(pid, "j")
-      press(pid, "q")
-      assert user_state(pid).mode == :playing
+      for key <- ["a", "j", "q", "Q", "H", "?", "S", "E", "enter", "esc"] do
+        press(pid, key)
+        assert user_state(pid).mode == :playing, "#{key} should be ignored during preparation"
+      end
     end
 
     test "a successful play result returns to list mode" do
@@ -815,6 +844,810 @@ defmodule Playmark.TUITest do
 
       assert user_state(pid).mode == :playing
       assert user_state(pid).playing.ref == active_ref
+    end
+  end
+
+  describe "unlocking browsing while a player runs" do
+    # Seeds a running play without going through start_play/4, so the unlock
+    # predicate can be driven message-by-message in both arrival orders.
+    defp seed_playing(pid, control) do
+      ref = make_ref()
+
+      :sys.replace_state(pid, fn s ->
+        playing = %{
+          ref: ref,
+          title: "V",
+          player: :test,
+          steps: [:playing],
+          stage: :starting,
+          control: control,
+          return_mode: :list,
+          origin: :list,
+          queue_id: nil
+        }
+
+        %{s | user_state: %{s.user_state | mode: :playing, playing: playing}}
+      end)
+
+      ref
+    end
+
+    defp progress(pid, ref, stage) do
+      send(pid, {:play_progress, ref, stage})
+      _ = :sys.get_state(pid)
+      user_state(pid)
+    end
+
+    test "an uncontrollable player unlocks browsing as soon as it reports :playing" do
+      pid = start_tui()
+      ref = seed_playing(pid, :none)
+
+      state = progress(pid, ref, :playing)
+
+      assert state.mode == :list
+      assert state.playing.ref == ref
+      assert state.playing.stage == :playing
+    end
+
+    test "a controllable player stays locked until its control socket is up" do
+      pid = start_tui()
+      ref = seed_playing(pid, :pending)
+
+      assert progress(pid, ref, :playing).mode == :playing
+
+      state = progress(pid, ref, {:control, :ready})
+
+      assert state.mode == :list
+      assert state.playing.control == :ready
+    end
+
+    test "the control report may arrive before the :playing stage" do
+      pid = start_tui()
+      ref = seed_playing(pid, :pending)
+
+      assert progress(pid, ref, {:control, :ready}).mode == :playing
+
+      assert progress(pid, ref, :playing).mode == :list
+    end
+
+    test "a control socket that never connects still unlocks, uncontrollably" do
+      pid = start_tui()
+      ref = seed_playing(pid, :pending)
+
+      _locked = progress(pid, ref, :playing)
+      state = progress(pid, ref, {:control, :none})
+
+      assert state.mode == :list
+      assert state.playing.control == :none
+    end
+
+    test "a stale control report cannot unlock the active play" do
+      pid = start_tui()
+      _ref = seed_playing(pid, :pending)
+
+      state = progress(pid, make_ref(), {:control, :ready})
+
+      assert state.mode == :playing
+      assert state.playing.control == :pending
+    end
+  end
+
+  describe "taking over a running player" do
+    setup do
+      Application.put_env(:playmark, :playback_impl, TestPlayback)
+      Application.put_env(:playmark, :test_playback_pid, self())
+
+      on_exit(fn ->
+        Application.delete_env(:playmark, :playback_impl)
+        Application.delete_env(:playmark, :test_playback_pid)
+      end)
+
+      :ok
+    end
+
+    # Seeds an already-running play whose "task" is the test process, so a stop
+    # request lands in the test's own mailbox and can be asserted directly.
+    # `test_pid` is captured out here on purpose: :sys.replace_state runs its
+    # function inside the TUI process, where self() would be the runtime.
+    defp seed_running(pid, url, control) do
+      test_pid = self()
+
+      :sys.replace_state(pid, fn s ->
+        playing = %{
+          ref: make_ref(),
+          task_pid: test_pid,
+          title: "Running",
+          url: url,
+          player: :vlc,
+          steps: [:playing],
+          stage: :playing,
+          control: control,
+          stream: nil,
+          captions: nil,
+          chapters: nil,
+          resume_position_ms: nil,
+          return_mode: :list,
+          origin: :list,
+          queue_id: nil
+        }
+
+        %{s | user_state: %{s.user_state | mode: :list, playing: playing}}
+      end)
+    end
+
+    test "Enter on another video stops the running player and starts the new one" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/new", title: "New", channel: "C"})
+      pid = start_tui()
+      seed_running(pid, "https://youtu.be/old", :ready)
+
+      press(pid, "enter")
+
+      assert_received :playmark_stop
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert user_state(pid).playing.title == "New"
+      send(play_task, :close)
+    end
+
+    test "Enter on the video already playing is refused, leaving it alone" do
+      url = "https://youtu.be/same"
+      Repo.insert!(%Bookmark{url: url, title: "Same", channel: "C"})
+      pid = start_tui()
+      seed_running(pid, url, :ready)
+
+      press(pid, "enter")
+
+      refute_received :playmark_stop
+      state = user_state(pid)
+      assert {:error, "Already playing"} = state.status
+      assert state.playing.title == "Running"
+      refute_receive {TestPlayback, _task}, 50
+    end
+
+    test "an uncontrollable player refuses takeover instead of being killed" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/new", title: "New", channel: "C"})
+      pid = start_tui()
+      seed_running(pid, "https://youtu.be/old", :none)
+
+      press(pid, "enter")
+
+      refute_received :playmark_stop
+      state = user_state(pid)
+      assert {:error, message} = state.status
+      assert message =~ "can't be interrupted"
+      assert state.playing.title == "Running"
+      refute_receive {TestPlayback, _task}, 50
+    end
+
+    test "a resume prompt does not stop the running player until it is answered" do
+      url = "https://youtu.be/resumable"
+      Repo.insert!(%Bookmark{url: url, title: "Resumable", channel: "C"})
+      {:ok, _} = History.record(%{title: "Resumable", url: url, local: false})
+      {:ok, _} = History.save_checkpoint(url, 120_000, 600_000)
+      pid = start_tui()
+      seed_running(pid, "https://youtu.be/old", :ready)
+
+      press(pid, "enter")
+
+      # The prompt is a question, so nothing has been killed yet and the outgoing
+      # player is still on screen.
+      assert user_state(pid).mode == :resume
+      refute_received :playmark_stop
+      assert user_state(pid).playing.title == "Running"
+
+      # Cancelling must leave the running player completely untouched.
+      press(pid, "esc")
+      refute_received :playmark_stop
+      assert user_state(pid).playing.title == "Running"
+    end
+
+    test "committing a resume prompt stops the running player" do
+      url = "https://youtu.be/resumable"
+      Repo.insert!(%Bookmark{url: url, title: "Resumable", channel: "C"})
+      {:ok, _} = History.record(%{title: "Resumable", url: url, local: false})
+      {:ok, _} = History.save_checkpoint(url, 120_000, 600_000)
+      pid = start_tui()
+      seed_running(pid, "https://youtu.be/old", :ready)
+
+      press(pid, "enter")
+      assert user_state(pid).mode == :resume
+
+      press(pid, "y")
+
+      assert_received :playmark_stop
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPlayback, :start_position, 120_000}, 1_000
+      assert user_state(pid).playing.title == "Resumable"
+      send(play_task, :close)
+    end
+
+    # `X` is the only key that stops playback as its own action. `q` keeps meaning
+    # quit — it just can't strand the player on the way out, so it stops it and
+    # waits for the checkpoint. No prompt: the player dies with the VM regardless,
+    # so there is nothing to decline.
+    test "q stops the player and quits, without a prompt" do
+      ref = make_ref()
+
+      state = %{
+        mode: :list,
+        playing: %{ref: ref, task_pid: self(), control: :ready, title: "Running"},
+        status: nil
+      }
+
+      # Pre-queue the result the real task would send, so the bounded receive in
+      # stop_player/1 returns without burning its timeout.
+      send(self(), {:play_result, ref, {:ok, :stopped}})
+
+      assert {:stop, stopped} =
+               TUI.handle_event(%Event.Key{code: "q", kind: "press", modifiers: []}, state)
+
+      assert_received :playmark_stop
+      assert stopped.playing == nil
+    end
+
+    # Preparation is not the brief wait it was documented as: on VLC with captions
+    # on it is a stream resolve, a metadata probe, a caption fetch, and a socket
+    # connect — measured at ~36s, and once over a minute. Esc has to work, exactly
+    # as it does for every other loading mode.
+
+    test "q during preparation is still swallowed, as there is no socket yet" do
+      pid = start_tui()
+
+      :sys.replace_state(pid, fn s ->
+        playing = %{ref: make_ref(), title: "Starting", control: :pending, stage: :resolving}
+        %{s | user_state: %{s.user_state | mode: :playing, playing: playing}}
+      end)
+
+      press(pid, "q")
+
+      assert user_state(pid).mode == :playing
+    end
+
+    test "stop_player/1 asks the player to quit and waits for it to report" do
+      ref = make_ref()
+
+      state = %{
+        playing: %{ref: ref, task_pid: self(), control: :ready, title: "Running"},
+        status: nil
+      }
+
+      # Pre-queue the result the real task would send, so the bounded receive
+      # returns without burning its timeout.
+      send(self(), {:play_result, ref, {:ok, :stopped}})
+
+      stopped = Playmark.TUI.PlaybackActions.stop_player(state)
+
+      assert_received :playmark_stop
+      assert stopped.playing == nil
+    end
+
+    test "X stops the player without quitting" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/a", title: "A", channel: "C"})
+      pid = start_tui()
+      seed_running(pid, "https://youtu.be/old", :ready)
+
+      press(pid, "X")
+
+      assert_received :playmark_stop
+      state = user_state(pid)
+      # The TUI stays up, and `playing` is cleared by the play result when the
+      # player actually exits — not optimistically here.
+      assert state.mode == :list
+      assert {:info, message} = state.status
+      assert message =~ "Stopping"
+    end
+
+    test "X on an uncontrollable player reports instead of pretending" do
+      pid = start_tui()
+      seed_running(pid, "https://youtu.be/old", :none)
+
+      press(pid, "X")
+
+      refute_received :playmark_stop
+      assert {:error, message} = user_state(pid).status
+      assert message =~ "can't be interrupted"
+    end
+
+    test "X with nothing playing does nothing" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/a", title: "A", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "X")
+
+      refute_received :playmark_stop
+      assert user_state(pid).mode == :list
+      assert user_state(pid).status == nil
+    end
+
+    # `q` and `X` are only the stop keys where `q` already meant "quit" — every
+    # browse mode. In a text field they are characters, and a running player must
+    # not turn typing "queen" into a quit prompt.
+    test "q typed into a search query is a character, not a quit prompt" do
+      pid = start_tui()
+      seed_running(pid, "https://youtu.be/old", :ready)
+      press(pid, "S")
+
+      press(pid, "q")
+
+      state = user_state(pid)
+      assert state.mode == :search_input
+      assert state.confirm == nil
+    end
+
+    test "q typed into a list filter is a character, not a quit prompt" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/a", title: "Quiet", channel: "C"})
+      pid = start_tui()
+      seed_running(pid, "https://youtu.be/old", :ready)
+      press(pid, "/")
+
+      press(pid, "q")
+
+      state = user_state(pid)
+      assert state.mode == :filter
+      assert state.filter == "q"
+      assert state.confirm == nil
+    end
+
+    test "X typed into a list filter is a character, not a stop" do
+      Repo.insert!(%Bookmark{url: "https://youtu.be/a", title: "Xylo", channel: "C"})
+      pid = start_tui()
+      seed_running(pid, "https://youtu.be/old", :ready)
+      press(pid, "/")
+
+      press(pid, "X")
+
+      refute_received :playmark_stop
+      state = user_state(pid)
+      assert state.mode == :filter
+      assert state.filter == "X"
+    end
+
+    # The resume prompt answers y/n/Esc. A stray `q` there must not stage a second
+    # prompt on top of it.
+    test "q during the resume prompt is not a quit prompt" do
+      pid = start_tui()
+
+      :sys.replace_state(pid, fn s ->
+        resume = %{
+          playable: %{title: "A", url: "https://youtu.be/a", local: false, author: nil},
+          position_ms: 30_000,
+          origin: :list,
+          display_mode: :list,
+          return_mode: :list,
+          queue_id: nil
+        }
+
+        %{s | user_state: %{s.user_state | mode: :resume, resume: resume}}
+      end)
+
+      seed_resume_player(pid)
+
+      press(pid, "q")
+
+      state = user_state(pid)
+      assert state.mode == :resume
+      assert state.confirm == nil
+    end
+
+    # Adds a running player without disturbing the mode seeded above.
+    defp seed_resume_player(pid) do
+      test_pid = self()
+
+      :sys.replace_state(pid, fn s ->
+        playing = %{
+          ref: make_ref(),
+          task_pid: test_pid,
+          title: "Running",
+          url: "https://youtu.be/old",
+          player: :vlc,
+          steps: [:playing],
+          stage: :playing,
+          control: :ready,
+          stream: nil,
+          captions: nil,
+          chapters: nil,
+          resume_position_ms: nil,
+          return_mode: :list,
+          origin: :list,
+          queue_id: nil
+        }
+
+        %{s | user_state: %{s.user_state | playing: playing}}
+      end)
+    end
+
+    # Playback is a background activity now, so a player exiting must not move the
+    # user. It only sets the mode when still locked in `:playing` — otherwise the
+    # TUI would yank you back to wherever the play was started from.
+    test "a play ending while browsing elsewhere leaves the mode alone" do
+      pid = start_tui()
+      ref = make_ref()
+
+      :sys.replace_state(pid, fn s ->
+        playing = %{ref: ref, title: "V", return_mode: :videos, origin: :list}
+
+        %{
+          s
+          | user_state: %{
+              s.user_state
+              | mode: :list,
+                view: :bookmarks,
+                playing: playing
+            }
+        }
+      end)
+
+      send(pid, {:play_result, ref, {:ok, :completed}})
+      _ = :sys.get_state(pid)
+
+      state = user_state(pid)
+      assert state.mode == :list
+      assert state.playing == nil
+    end
+
+    test "a play failing during preparation still unlocks the TUI" do
+      pid = start_tui()
+      ref = make_ref()
+
+      :sys.replace_state(pid, fn s ->
+        playing = %{ref: ref, title: "V", return_mode: :videos, origin: :list}
+        %{s | user_state: %{s.user_state | mode: :playing, playing: playing}}
+      end)
+
+      send(pid, {:play_result, ref, {:error, "boom"}})
+      _ = :sys.get_state(pid)
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert {:error, message} = state.status
+      assert message =~ "boom"
+    end
+  end
+
+  describe "canceling preparation" do
+    defp seed_preparing(pid, overrides \\ %{}) do
+      test_pid = self()
+
+      :sys.replace_state(pid, fn s ->
+        playing =
+          Map.merge(
+            %{
+              ref: make_ref(),
+              task_pid: test_pid,
+              title: "Preparing",
+              url: "https://youtu.be/prep",
+              player: :vlc,
+              steps: [:resolving, :captions, :playing],
+              stage: :resolving,
+              control: :pending,
+              stream: nil,
+              captions: nil,
+              chapters: nil,
+              resume_position_ms: nil,
+              return_mode: :videos,
+              origin: :list,
+              queue_id: nil
+            },
+            overrides
+          )
+
+        %{s | user_state: %{s.user_state | mode: :playing, playing: playing}}
+      end)
+    end
+
+    test "Esc during preparation releases the UI to where the play started" do
+      pid = start_tui()
+      seed_preparing(pid)
+
+      press(pid, "esc")
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert state.playing == nil
+      assert {:info, message} = state.status
+      assert message =~ "Canceled"
+    end
+
+    # The yt-dlp child outlives a killed Task (verified: a System.cmd child
+    # survives Process.exit(:kill) on its task), so canceling can only mean
+    # "stop waiting". The stop message covers the race where the player launches
+    # anyway: Control's selective receive picks it up once monitoring starts, so
+    # we never strand a player with no `playing` state to stop it from.
+    test "Esc asks the task to stop, so a player that still launches is not stranded" do
+      pid = start_tui()
+      seed_preparing(pid)
+
+      press(pid, "esc")
+
+      assert_received :playmark_stop
+    end
+
+    test "a late result from a canceled preparation is dropped" do
+      pid = start_tui()
+      ref = make_ref()
+      seed_preparing(pid, %{ref: ref})
+
+      press(pid, "esc")
+      send(pid, {:play_result, ref, {:ok, :completed}})
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert state.playing == nil
+    end
+
+    # Canceling one video's preparation must not disturb a player already up:
+    # takeover sends its stop from launch_play/6, so at this point the outgoing
+    # player is already gone — but the *new* preparation is what Esc cancels.
+    test "Esc during preparation of a queued item stops the queue rather than advancing" do
+      {:ok, item} = Queue.enqueue(%{title: "Q1", url: "https://youtu.be/q1", local: false})
+
+      pid = start_tui()
+      seed_preparing(pid, %{origin: :queue, queue_id: item.id, return_mode: :list})
+
+      press(pid, "esc")
+
+      state = user_state(pid)
+      assert state.playing == nil
+      # The item stays queued: canceling is not completing.
+      assert length(Queue.list_items()) == 1
+    end
+  end
+
+  describe "now playing strip" do
+    # The strip is the only widget whose text leads with the play glyph.
+    defp strip_text(widgets) do
+      for {widget, _rect} <- widgets,
+          text = Map.get(widget, :text),
+          is_binary(text),
+          String.starts_with?(text, "▶"),
+          do: text
+    end
+
+    defp seed_strip(pid, overrides) do
+      test_pid = self()
+
+      :sys.replace_state(pid, fn s ->
+        playing =
+          Map.merge(
+            %{
+              ref: make_ref(),
+              task_pid: test_pid,
+              title: "Elixir in Action",
+              author: "Saša Jurić",
+              url: "https://youtu.be/x",
+              player: :vlc,
+              steps: [:playing],
+              stage: :playing,
+              control: :ready,
+              stream: nil,
+              captions: nil,
+              chapters: nil,
+              resume_position_ms: nil,
+              return_mode: :list,
+              origin: :list,
+              queue_id: nil
+            },
+            Map.new(overrides)
+          )
+
+        mode = Map.get(Map.new(overrides), :mode, :list)
+        %{s | user_state: %{s.user_state | mode: mode, playing: playing}}
+      end)
+
+      user_state(pid)
+    end
+
+    test "a running player shows a compact strip, leaving the footer last" do
+      pid = start_tui()
+      state = seed_strip(pid, [])
+
+      widgets = TUI.render(state, frame())
+
+      assert [strip] = strip_text(widgets)
+      assert strip =~ "Elixir in Action"
+      assert strip =~ "Saša Jurić"
+      assert strip =~ "vlc"
+
+      # The footer stays the last widget so status/hint rendering is untouched.
+      assert footer_text(widgets) =~ "q: quit"
+    end
+
+    test "a status message does not displace the strip" do
+      pid = start_tui()
+      state = seed_strip(pid, [])
+      state = %{state | status: {:info, "Queued: Something"}}
+
+      widgets = TUI.render(state, frame())
+
+      assert [strip] = strip_text(widgets)
+      assert strip =~ "Elixir in Action"
+      assert footer_text(widgets) =~ "Queued: Something"
+    end
+
+    test "an unknown author is omitted rather than left blank" do
+      pid = start_tui()
+      state = seed_strip(pid, author: nil)
+
+      assert [strip] = strip_text(TUI.render(state, frame()))
+      assert strip =~ "Elixir in Action"
+      refute strip =~ "—"
+    end
+
+    test "no strip while the player is still starting" do
+      pid = start_tui()
+      state = seed_strip(pid, mode: :playing, stage: :resolving)
+
+      # Preparation still owns the body with its step checklist, so a strip would
+      # only duplicate it.
+      widgets = TUI.render(state, frame())
+      assert strip_text(widgets) == []
+      assert Enum.member?(block_titles(widgets), " Now playing ")
+    end
+
+    test "no strip when nothing is playing" do
+      pid = start_tui()
+
+      assert strip_text(TUI.render(user_state(pid), frame())) == []
+    end
+
+    # `:playing` is preparation-only now, so its footer must not tell the user to
+    # close a player to get back — nothing is up yet, and once it is the browse
+    # mode returns on its own. It also offers no keys, because none are accepted.
+    test "the preparation footer names the wait and offers no keys" do
+      pid = start_tui()
+
+      for stage <- [:resolving, :captions, :playing] do
+        state = seed_strip(pid, mode: :playing, stage: stage, control: :pending)
+        footer = footer_text(TUI.render(state, frame()))
+
+        refute footer =~ "close it to return"
+        refute footer =~ "Q: queue"
+        assert footer =~ ~r/Preparing playback|Starting player/
+      end
+    end
+  end
+
+  # A staged confirm must keep the page it was staged over on screen, with the
+  # prompt in the footer. Before this, only a confirm staged from `:list` rendered
+  # correctly — that one mode happens to fall through to the right view clauses —
+  # and the bug surfaced the day a confirmation first became reachable from a
+  # *video* list. Rendering must not depend on which actions happen to stage a
+  # confirm today, so every mode is covered here with a generic one.
+  describe "a confirmation keeps its underlying page on screen" do
+    defp confirm_state(pid, overrides) do
+      :sys.replace_state(pid, fn s ->
+        base = %{
+          s.user_state
+          | mode: :confirm,
+            confirm: %{action: :delete_selected, prompt: "Delete \"V\"?"},
+            status: nil
+        }
+
+        %{s | user_state: Map.merge(base, Map.new(overrides))}
+      end)
+
+      user_state(pid)
+    end
+
+    test "over a channel's video list, not the subscriptions list underneath" do
+      pid = start_tui()
+
+      state =
+        confirm_state(pid,
+          confirm_return: :videos,
+          view: :subscriptions,
+          videos: [%{id: "x", title: "Chosen Video", url: "u", live: :none}],
+          channel_name: "Chan A",
+          selected: 0
+        )
+
+      widgets = TUI.render(state, frame())
+
+      assert Enum.member?(table_rows(widgets), ["Chosen Video", "", ""])
+      # The header keeps the channel context too, rather than flipping back.
+      assert Enum.at(widgets, 0) |> elem(0) |> Map.get(:text) =~ "Chan A"
+      assert footer_text(widgets) =~ "Delete \"V\"?"
+    end
+
+    test "over Search results" do
+      pid = start_tui()
+
+      state =
+        confirm_state(pid,
+          confirm_return: :search_results,
+          search_videos: [%{id: "s", title: "Found It", url: "u", live: :none}],
+          search_query: "q",
+          search_selected: 0
+        )
+
+      assert Enum.member?(table_rows(TUI.render(state, frame())), ["Found It", "", ""])
+    end
+
+    test "over Explore" do
+      pid = start_tui()
+
+      state =
+        confirm_state(pid,
+          confirm_return: :explore,
+          explore_videos: [%{id: "e", title: "Recommended", url: "u", live: :none}],
+          explore_selected: 0
+        )
+
+      assert Enum.member?(table_rows(TUI.render(state, frame())), ["Recommended", "", ""])
+    end
+
+    test "over a channel's playlist containers" do
+      pid = start_tui()
+
+      state =
+        confirm_state(pid,
+          confirm_return: :channel_playlists,
+          channel_playlists: [%{id: "p", title: "Some Course", url: "u"}],
+          channel_playlist_channel_name: "Chan A",
+          channel_playlist_selected: 0
+        )
+
+      assert Enum.member?(table_rows(TUI.render(state, frame())), ["Some Course"])
+    end
+
+    test "over an open local folder, not the Locals list underneath" do
+      pid = start_tui()
+
+      state =
+        confirm_state(pid,
+          confirm_return: :videos,
+          view: :locals,
+          selected: 0,
+          channel_name: "v",
+          local_root: "/v",
+          local_root_name: "v",
+          local_path: "/v",
+          videos: [
+            %{kind: :file, id: "/v/a.mp4", title: "a.mp4", url: "/v/a.mp4"},
+            %{kind: :directory, id: "/v/season", title: "season", path: "/v/season"}
+          ]
+        )
+
+      widgets = TUI.render(state, frame())
+
+      # The folder's rows, with their types — not the registered-locals table, which
+      # would render as name/path pairs under Name/Path.
+      assert Enum.member?(table_rows(widgets), ["a.mp4", "File"])
+      assert Enum.member?(table_rows(widgets), ["season", "Folder"])
+      assert footer_text(widgets) =~ "Delete \"V\"?"
+    end
+
+    # Regression guard: the queue and history confirmations already worked through
+    # dedicated branches. Whatever fixes the modes above must not lose them.
+    test "over the queue, as before" do
+      {:ok, _} = Queue.enqueue(%{title: "Queued Thing", url: "u", local: false})
+      pid = start_tui()
+
+      state =
+        confirm_state(pid,
+          confirm_return: :queue_manage,
+          queue: Queue.list_items(),
+          confirm: %{action: :clear_queue, prompt: "Clear all 1 queued item?"}
+        )
+
+      widgets = TUI.render(state, frame())
+      assert Enum.member?(block_titles(widgets), " Queue ")
+      assert Enum.any?(table_rows(widgets), &("Queued Thing" in &1))
+    end
+
+    test "over history, as before" do
+      {:ok, _} = History.record(%{title: "Watched Thing", url: "u"})
+      pid = start_tui()
+
+      state =
+        confirm_state(pid,
+          confirm_return: :history,
+          history: History.list_items(),
+          confirm: %{action: :clear_history, prompt: "Clear all 1 history entry?"}
+        )
+
+      widgets = TUI.render(state, frame())
+      assert Enum.member?(block_titles(widgets), " History ")
+      assert Enum.any?(table_rows(widgets), &("Watched Thing" in &1))
     end
   end
 
@@ -1836,12 +2669,12 @@ defmodule Playmark.TUITest do
       assert queued.local == false
 
       press(pid, "enter")
-      assert user_state(pid).mode == :playing
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert user_state(pid).mode == :search_results
       assert user_state(pid).playing.return_mode == :search_results
       assert [entry] = History.list_items()
       assert entry.local == false
 
-      assert_receive {TestPlayback, play_task}, 1_000
       send(play_task, :close)
       _ = :sys.get_state(pid)
       assert user_state(pid).mode == :search_results
@@ -2581,10 +3414,12 @@ defmodule Playmark.TUITest do
       end)
 
       press(pid, "enter")
-      assert user_state(pid).mode == :playing
 
-      # play_local/3 on the stub announced itself; release it.
+      # play_local/3 on the stub announced itself, so its :playing report is
+      # already queued: browsing is unlocked back to the folder listing.
       assert_receive {TestPlayback, play_task}, 1_000
+      assert user_state(pid).mode == :videos
+
       send(play_task, :close)
       _ = :sys.get_state(pid)
       assert user_state(pid).mode == :videos
@@ -2653,6 +3488,197 @@ defmodule Playmark.TUITest do
       press(pid, "e")
       assert user_state(pid).queue == []
       assert {:info, "Only media files can be queued"} = user_state(pid).status
+    end
+  end
+
+  describe "deleting a local file" do
+    setup do
+      Application.put_env(:playmark, :local_files_impl, TestLocalFiles)
+      Application.put_env(:playmark, :test_local_files_pid, self())
+
+      on_exit(fn ->
+        Application.delete_env(:playmark, :local_files_impl)
+        Application.delete_env(:playmark, :test_local_files_pid)
+      end)
+    end
+
+    # Puts the runtime in a local folder listing, as reading one would have.
+    defp in_local_folder(pid, entries, opts \\ []) do
+      :sys.replace_state(pid, fn s ->
+        user_state = %{
+          s.user_state
+          | view: :locals,
+            mode: :videos,
+            videos: entries,
+            selected: Keyword.get(opts, :selected, 0),
+            filter: Keyword.get(opts, :filter, ""),
+            channel_name: "v",
+            local_root: "/tmp/v",
+            local_root_name: "v",
+            local_path: "/tmp/v"
+        }
+
+        %{s | user_state: user_state}
+      end)
+    end
+
+    defp file(name) do
+      %{kind: :file, id: "/tmp/v/#{name}", title: name, url: "/tmp/v/#{name}"}
+    end
+
+    defp folder(name) do
+      %{kind: :directory, id: "/tmp/v/#{name}", title: name, path: "/tmp/v/#{name}"}
+    end
+
+    test "d stages a confirmation without deleting anything" do
+      pid = start_tui()
+      in_local_folder(pid, [file("a.mp4"), file("b.mp4")])
+
+      press(pid, "d")
+
+      state = user_state(pid)
+      assert state.mode == :confirm
+      assert state.confirm_return == :videos
+      assert state.confirm.action == :delete_local_entry
+      assert state.confirm.prompt == ~s(Delete file "a.mp4" from disk?)
+      # Nothing deleted yet — both rows are still there and no task was spawned.
+      assert length(state.videos) == 2
+      refute_received {TestLocalFiles, _task, {:delete, _path}}
+    end
+
+    test "y deletes the file and re-lists the folder it was in" do
+      pid = start_tui()
+      in_local_folder(pid, [file("a.mp4"), file("b.mp4")])
+
+      press(pid, "d")
+      press(pid, "y")
+
+      state = user_state(pid)
+      assert state.mode == :loading
+      assert state.confirm == nil
+      assert {:info, "Deleting a.mp4… (Esc to cancel)"} = state.status
+
+      assert_receive {TestLocalFiles, task, {:delete, "/tmp/v/a.mp4"}}, 1_000
+      send(task, {:result, :ok})
+
+      # The same task goes on to re-read the folder, so the count reflects reality.
+      assert_receive {TestLocalFiles, read_task, "/tmp/v"}, 1_000
+      send(read_task, {:entries, [file("b.mp4")]})
+      _ = :sys.get_state(pid)
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert state.videos == [file("b.mp4")]
+      assert {:info, "Deleted a.mp4. 1 file in v"} = state.status
+    end
+
+    test "the cursor lands on the row that took the deleted file's place" do
+      pid = start_tui()
+      in_local_folder(pid, [file("a.mp4"), file("b.mp4"), file("c.mp4")], selected: 1)
+
+      press(pid, "d")
+      press(pid, "y")
+      assert_receive {TestLocalFiles, task, {:delete, "/tmp/v/b.mp4"}}, 1_000
+      send(task, {:result, :ok})
+      assert_receive {TestLocalFiles, read_task, "/tmp/v"}, 1_000
+      # b.mp4 is gone; c.mp4 slid down into the index it occupied.
+      send(read_task, {:entries, [file("a.mp4"), file("c.mp4")]})
+      _ = :sys.get_state(pid)
+
+      assert user_state(pid).selected == 1
+    end
+
+    test "any other key cancels, leaving the file alone" do
+      pid = start_tui()
+      in_local_folder(pid, [file("a.mp4")])
+
+      press(pid, "d")
+      press(pid, "n")
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert state.videos == [file("a.mp4")]
+      assert {:info, "Canceled"} = state.status
+      refute_received {TestLocalFiles, _task, {:delete, _path}}
+    end
+
+    test "d on a folder refuses rather than asking" do
+      pid = start_tui()
+      in_local_folder(pid, [folder("season"), file("a.mp4")])
+
+      press(pid, "d")
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert {:info, "Only files can be deleted"} = state.status
+      refute_received {TestLocalFiles, _task, {:delete, _path}}
+    end
+
+    test "a failed delete reports the reason and keeps the rows" do
+      pid = start_tui()
+      in_local_folder(pid, [file("a.mp4"), file("b.mp4")])
+
+      press(pid, "d")
+      press(pid, "y")
+      assert_receive {TestLocalFiles, task, {:delete, "/tmp/v/a.mp4"}}, 1_000
+      send(task, {:result, {:error, "could not delete /tmp/v/a.mp4: permission denied"}})
+      _ = :sys.get_state(pid)
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert state.videos == [file("a.mp4"), file("b.mp4")]
+      assert {:error, "could not delete /tmp/v/a.mp4: permission denied"} = state.status
+      # A failed delete has nothing new to list, so it does not go on to re-read.
+      refute_received {TestLocalFiles, _task, "/tmp/v"}
+    end
+
+    test "Esc cancels a delete in flight and its stale result is dropped" do
+      pid = start_tui()
+      in_local_folder(pid, [file("a.mp4")])
+
+      press(pid, "d")
+      press(pid, "y")
+      assert_receive {TestLocalFiles, task, {:delete, "/tmp/v/a.mp4"}}, 1_000
+      ref = user_state(pid).local_request_ref
+
+      press(pid, "esc")
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert state.videos == [file("a.mp4")]
+      assert {:info, "Canceled"} = state.status
+      refute Process.alive?(task)
+
+      send(pid, {:local_entries_result, ref, {:ok, []}})
+      _ = :sys.get_state(pid)
+
+      assert user_state(pid).videos == [file("a.mp4")]
+    end
+
+    test "d in a non-local video list does nothing" do
+      pid = start_tui()
+      video = %{title: "V", url: "https://youtu.be/v"}
+
+      :sys.replace_state(pid, fn s ->
+        %{
+          s
+          | user_state: %{
+              s.user_state
+              | view: :subscriptions,
+                mode: :videos,
+                videos: [video],
+                channel_url: "https://youtube.com/@c"
+            }
+        }
+      end)
+
+      press(pid, "d")
+
+      state = user_state(pid)
+      assert state.mode == :videos
+      assert state.confirm == nil
+      assert state.videos == [video]
+      refute_received {TestLocalFiles, _task, {:delete, _path}}
     end
   end
 
@@ -3253,14 +4279,14 @@ defmodule Playmark.TUITest do
       end)
 
       press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
       state = user_state(pid)
-      assert state.mode == :playing
+      assert state.mode == :explore
       assert state.playing.origin == :explore
       assert [entry] = History.list_items()
       assert entry.local == false
       assert entry.author == "Channel"
 
-      assert_receive {TestPlayback, play_task}, 1_000
       send(play_task, :close)
       _ = :sys.get_state(pid)
       assert user_state(pid).mode == :explore
@@ -3300,7 +4326,7 @@ defmodule Playmark.TUITest do
       assert user_state(pid).queue == []
     end
 
-    test "a Queue failure opened from Explore keeps Explore as the modal return" do
+    test "a Queue failure opened from Explore returns straight to Explore" do
       {:ok, item} = Queue.enqueue(%{title: "Queued", url: "https://youtu.be/abcdefghijk"})
       pid = start_tui()
       ref = make_ref()
@@ -3326,10 +4352,11 @@ defmodule Playmark.TUITest do
       send(pid, {:play_result, ref, {:error, "failed"}})
       _ = :sys.get_state(pid)
 
-      assert user_state(pid).mode == :queue_manage
-      assert user_state(pid).queue_return == :explore
-      press(pid, "esc")
-      assert user_state(pid).mode == :explore
+      # The modal is no longer forced open on failure, so the play lands back
+      # where browsing was, with the error reported in the footer.
+      state = user_state(pid)
+      assert state.mode == :explore
+      assert {:error, "Playback failed: failed"} = state.status
     end
 
     test "renders the Explore overlay and its controls" do
@@ -3430,23 +4457,25 @@ defmodule Playmark.TUITest do
       assert user_state(pid).mode == :list
     end
 
-    test "Q can be opened over the running player and Esc returns to :playing" do
+    test "Q opens over a running player and Esc returns to the browse mode" do
       Repo.insert!(%Bookmark{url: "https://youtu.be/a", title: "A", channel: "C"})
       pid = start_tui()
       press(pid, "enter")
-      assert user_state(pid).mode == :playing
       assert_receive {TestPlayback, play_task}, 1_000
+      assert user_state(pid).mode == :list
 
       press(pid, "Q")
       assert user_state(pid).mode == :queue_manage
-      assert user_state(pid).queue_return == :playing
+      # The player no longer holds the mode, so the modal remembers the browse
+      # mode it was opened over rather than :playing.
+      assert user_state(pid).queue_return == :list
 
       footer = footer_text(TUI.render(user_state(pid), frame()))
-      refute footer =~ "Enter: play"
       assert footer =~ "q: quit"
 
       press(pid, "esc")
-      assert user_state(pid).mode == :playing
+      assert user_state(pid).mode == :list
+      refute is_nil(user_state(pid).playing)
 
       send(play_task, :close)
     end
@@ -3581,12 +4610,30 @@ defmodule Playmark.TUITest do
       press(pid, "Q")
       press(pid, "enter")
 
+      assert_receive {TestPlayback, play_task}, 1_000
       state = user_state(pid)
-      assert state.mode == :playing
+      assert state.mode == :list
       assert state.playing.title == "First"
       assert state.playing.origin == :queue
 
+      send(play_task, :close)
+    end
+
+    test "a queued item with a checkpoint resumes silently instead of prompting" do
+      url = "https://youtu.be/queued"
+      {:ok, _} = Queue.enqueue(%{title: "Queued", url: url, local: false})
+      {:ok, _} = History.record(%{title: "Queued", url: url, local: false})
+      {:ok, _} = History.save_checkpoint(url, 60_000, 300_000)
+      pid = start_tui()
+
+      press(pid, "Q")
+      press(pid, "enter")
+
+      # The queue is unattended playback: a modal question would steal focus from
+      # whatever is being browsed, so the checkpoint is honoured without asking.
       assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPlayback, :start_position, 60_000}, 1_000
+      refute user_state(pid).mode == :resume
       send(play_task, :close)
     end
 
@@ -3622,14 +4669,15 @@ defmodule Playmark.TUITest do
       send(pid, {:play_result, ref, {:ok, :completed}})
       _ = :sys.get_state(pid)
 
+      assert_receive {TestPlayback, play_task}, 1_000
       state = user_state(pid)
-      # First was dropped; the player is now on Second, still in :playing.
-      assert state.mode == :playing
+      # First was dropped; the player advanced to Second, and because the advance
+      # goes through start_play the unlock applies to it too.
+      assert state.mode == :list
       assert state.playing.title == "Second"
       assert state.playing.origin == :queue
       assert Enum.map(state.queue, & &1.title) == ["Second"]
 
-      assert_receive {TestPlayback, play_task}, 1_000
       send(play_task, :close)
     end
 
@@ -3682,12 +4730,48 @@ defmodule Playmark.TUITest do
       _ = :sys.get_state(pid)
 
       state = user_state(pid)
-      assert state.mode == :queue_manage
+      # Reporting no longer pops the modal open: it would interrupt whatever the
+      # user is browsing. The mode still leaves :playing, or a stop during
+      # preparation would strand the TUI locked.
+      assert state.mode == :list
+      assert state.playing == nil
       assert Enum.map(state.queue, & &1.title) == ["Partial", "Next"]
       assert {:info, "Playback stopped; progress saved"} = state.status
     end
 
-    test "a queued item failing stops the queue and shows the modal" do
+    test "a stopped queued item does not disturb the list being browsed" do
+      {:ok, first} = Queue.enqueue(%{title: "Partial", url: "u-1", local: false})
+      pid = start_tui()
+      ref = make_ref()
+
+      :sys.replace_state(pid, fn s ->
+        playing = %{
+          ref: ref,
+          title: "Partial",
+          player: :vlc,
+          origin: :queue,
+          queue_id: first.id,
+          return_mode: :videos
+        }
+
+        %{
+          s
+          | user_state: %{
+              s.user_state
+              | mode: :videos,
+                videos: [%{id: "x", title: "Vid X", url: "https://youtu.be/x"}],
+                playing: playing
+            }
+        }
+      end)
+
+      send(pid, {:play_result, ref, {:ok, :stopped}})
+      _ = :sys.get_state(pid)
+
+      assert user_state(pid).mode == :videos
+    end
+
+    test "a queued item failing stops the queue and reports it" do
       {:ok, bad} = Queue.enqueue(%{title: "Bad", url: "u-1", local: false})
       {:ok, _next} = Queue.enqueue(%{title: "Next", url: "u-2", local: false})
       pid = start_tui()
@@ -3709,7 +4793,7 @@ defmodule Playmark.TUITest do
       _ = :sys.get_state(pid)
 
       state = user_state(pid)
-      assert state.mode == :queue_manage
+      assert state.mode == :list
       # Stop-and-report: the failed item stays in place, nothing auto-skips.
       assert Enum.map(state.queue, & &1.title) == ["Bad", "Next"]
       assert {:error, "Playback failed: vlc exited with 1"} = state.status
@@ -3872,8 +4956,8 @@ defmodule Playmark.TUITest do
       pid = start_tui()
 
       press(pid, "enter")
-      assert user_state(pid).mode == :playing
       assert_receive {TestPlayback, play_task}, 1_000
+      assert user_state(pid).mode == :list
 
       assert [entry] = History.list_items()
       assert entry.title == "A"
@@ -3909,15 +4993,22 @@ defmodule Playmark.TUITest do
       assert state.history_return == :videos
     end
 
-    test "H is a no-op over the running player" do
+    test "H opens history while a player runs, since browsing is unlocked" do
       Repo.insert!(%Bookmark{url: "https://youtu.be/a", title: "A", channel: "C"})
       pid = start_tui()
       press(pid, "enter")
-      assert user_state(pid).mode == :playing
       assert_receive {TestPlayback, play_task}, 1_000
+      assert user_state(pid).mode == :list
 
+      # H was previously refused over the player. Now that playback no longer
+      # owns the mode, the overlay opens like any other and returns to browsing.
       press(pid, "H")
-      assert user_state(pid).mode == :playing
+      assert user_state(pid).mode == :history
+      assert user_state(pid).history_return == :list
+
+      press(pid, "esc")
+      assert user_state(pid).mode == :list
+      refute is_nil(user_state(pid).playing)
 
       send(play_task, :close)
     end
@@ -4014,8 +5105,9 @@ defmodule Playmark.TUITest do
       press(pid, "H")
 
       press(pid, "enter")
-      assert user_state(pid).mode == :playing
       assert_receive {TestPlayback, play_task}, 1_000
+      # History's saved return mode is where browsing resumes.
+      assert user_state(pid).mode == :list
 
       send(play_task, :close)
     end
@@ -4249,13 +5341,13 @@ defmodule Playmark.TUITest do
       press(pid, "enter")
       press(pid, "enter")
 
+      assert_receive {TestPlayback, play_task}, 1_000
       state = user_state(pid)
-      assert state.mode == :playing
+      assert state.mode == :list
       # The panel is seeded from the selected item — proving Enter resolved the
       # filtered selection ("Phoenix LiveView"), not the original index-0 row.
       assert state.playing.title == "Phoenix LiveView"
 
-      assert_receive {TestPlayback, play_task}, 1_000
       send(play_task, :close)
     end
 

@@ -9,9 +9,9 @@ defmodule Playmark.TUI.QueueActions do
   by the view the row came from.
 
   `enqueue/4` is the funnel every enqueue routes through, whatever list the row
-  came from. The modal it feeds opens over any browse mode *or* over the running
-  player, which is why `start_queue/1`'s first clause refuses to start a second
-  play; the running player must close first.
+  came from. The modal it feeds opens over any browse mode — including with a
+  player running, since playback no longer owns the mode. It is *not* reachable
+  during `:playing`, which is a brief, uninterruptible preparation window.
 
   Every destructive key here — remove one, clear all — is staged behind
   `:confirm` mode rather than acting immediately, mirroring a list delete.
@@ -50,8 +50,9 @@ defmodule Playmark.TUI.QueueActions do
   @doc """
   Opens the queue-manage modal, remembering the mode to restore on Esc.
 
-  The modal is reachable from any browse mode or over the running player; the
-  running player is untouched; changes affect the persisted queue.
+  The modal is reachable from any browse mode, including with a player running —
+  the player is untouched; changes affect the persisted queue. `Enter` on the head
+  while a player runs goes through the ordinary takeover path.
   """
   def open_queue(state) do
     %{
@@ -196,10 +197,8 @@ defmodule Playmark.TUI.QueueActions do
 
   # Enter in the modal starts playback from the head, origin :queue, so the
   # `:play_result` handler auto-advances through the rest (see Playmark.TUI). A
-  # no-op on an empty queue, and ignored while already playing — the running
-  # player must close first (the modal can be opened over :playing).
-  defp start_queue(%{queue_return: :playing} = state), do: state
-
+  # no-op on an empty queue. Starting a play while one runs is handled by
+  # `PlaybackActions.takeover/2`, which replaces the running player or refuses.
   defp start_queue(state) do
     case Queue.head() do
       nil ->

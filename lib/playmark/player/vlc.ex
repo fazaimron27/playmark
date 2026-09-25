@@ -24,6 +24,18 @@ defmodule Playmark.Player.Vlc do
   we force it on the `yt-dlp -g` call via `--extractor-args`. (Captions use a
   different client — see `Playmark.Player.Captions`.)
 
+  ## Demuxer (why streams are opened as `https/avformat://…`)
+
+  Those HLS segments still `403` intermittently, and VLC's own `adaptive` demuxer
+  probes the *first* segment to determine the container format — so one failed
+  segment aborts the whole input rather than being skipped. That is the second
+  "opens then closes", distinguishable by `Failed to create demuxer (nil)
+  Unknown` in VLC's log. ffmpeg's demuxer retries and skips, so `play/2` forces it
+  (see `demux_mrl/2`). The demuxer is named in the MRL rather than passed as
+  `--demux=avformat`, because that flag is global and also captured the caption
+  sidecar — which broke playback outright with "Unidentified codec". Streams only;
+  local files are left alone.
+
   Local files need no `yt-dlp`; VLC auto-loads a sidecar `.srt`/`.vtt` next to the
   file, so `play_local/2` just plays the path fullscreen.
   """
@@ -60,7 +72,9 @@ defmodule Playmark.Player.Vlc do
 
       try do
         Playback.report(opts, :playing)
-        launch(urls, sub_file, opts)
+        # A resolved YouTube stream is HLS, so force ffmpeg's demuxer — VLC's own
+        # aborts the input when the first segment 403s. See demux_args/1.
+        launch(urls, sub_file, Map.put(opts, :force_demux, "avformat"))
       after
         Captions.cleanup(sub_file)
       end
@@ -140,15 +154,56 @@ defmodule Playmark.Player.Vlc do
   end
 
   # Single muxed stream, or a split rendition with audio attached as a slave.
-  defp vlc_args([video], opts), do: base_args(opts) ++ [video]
+  # Both carry the forced demuxer on their own MRL: the audio slave is HLS too,
+  # so it needs the same segment tolerance as the video.
+  defp vlc_args([video], opts), do: base_args(opts) ++ [demux_mrl(video, opts)]
 
   defp vlc_args([video, audio | _], opts),
-    do: base_args(opts) ++ [video, "--input-slave=#{audio}"]
+    do: base_args(opts) ++ [demux_mrl(video, opts), "--input-slave=#{demux_mrl(audio, opts)}"]
 
   defp base_args(opts) do
     ["-f", "--no-video-title-show", "--play-and-exit"] ++
       control_args(opts) ++ resume_args(opts)
   end
+
+  # VLC's own `adaptive` demuxer probes the *first* HLS segment to determine the
+  # container format, so a single failed segment aborts the whole input — that is
+  # the "opens then closes" with `Failed to create demuxer (nil) Unknown`, and it
+  # is exactly where YouTube's intermittent 403s land. ffmpeg's demuxer retries
+  # and skips instead, which is the only reason mpv survives streams VLC does not.
+  #
+  # Measured against a local HLS stream with chosen segments forced to 403:
+  # segment 0 failing killed `adaptive` and played fine under `avformat`; a
+  # mid-stream failure was survivable either way; `--adaptive-use-access` did not
+  # help.
+  #
+  # The demuxer rides on the MRL (`https/avformat://host/path`) rather than the
+  # `--demux=avformat` flag this first used, because that flag is global in the
+  # literal sense — VLC applied it to the `--sub-file` sidecar as well. It opened
+  # the `.vtt` with avformat instead of its native `webvtt` demuxer, produced an
+  # SPU stream nothing could decode, and failed the play outright:
+  #
+  #     main decoder debug: no spu decoder modules matched
+  #     main decoder error: Unidentified codec
+  #
+  # So captions and this fix were mutually exclusive until the scope shrank to one
+  # MRL. Verified against VLC 3.0.23: with the MRL form the stream still gets
+  # `avformat` while the sidecar goes back to `webvtt`. Item-scoped `:demux=`
+  # after the input does *not* work — the slave belongs to that same input item
+  # and inherits it. (An earlier note here claimed `--sub-file` kept working under
+  # the global flag; it was never exercised with a real sidecar.)
+  #
+  # Applied only on the streaming path (see `play/2`), never for local files:
+  # forcing ffmpeg's demuxer on every container VLC handles natively is a broader
+  # change than this problem needs.
+  defp demux_mrl(url, %{force_demux: demux}) when is_binary(demux) do
+    case String.split(url, "://", parts: 2) do
+      [access, rest] -> "#{access}/#{demux}://#{rest}"
+      _ -> url
+    end
+  end
+
+  defp demux_mrl(url, _opts), do: url
 
   defp control_args(%{control_port: port}) when is_integer(port) and port > 0 do
     ["--no-one-instance", "--extraintf=rc", "--rc-host=127.0.0.1:#{port}"]

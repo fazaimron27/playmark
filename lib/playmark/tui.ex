@@ -25,19 +25,28 @@ defmodule Playmark.TUI do
       `:channel_playlists_filter` — fetch and browse a channel's non-playable
                      playlist containers. `Enter` opens one into `:videos`; `p`
                      saves it to the top-level Playlists view.
-    * `:playing`  — the playback task is preparing or running the external
-                     player; only `Q` is accepted until it finishes.
+    * `:playing`  — a *preparation* mode: the playback task is resolving the
+                     stream and fetching captions, and no keys are accepted while
+                     it runs. It ends as soon as the player is actually up, at
+                     which point the browse mode is restored and `state.playing`
+                     stays populated — so browsing continues with the player
+                     running, and a one-row strip above the footer names it.
+                     Pressing `Enter` on another video then *replaces* the running
+                     player (mpv/VLC only; ffplay has no control socket and
+                     refuses), and `q` stages a confirmation before stopping it.
     * `:resume`   — a saved checkpoint is waiting for `y` (resume), `n` (start
-                     over), or `Esc` (cancel). The originating page stays visible.
+                     over), or `Esc` (cancel). The originating page stays visible,
+                     and any already-running player is left untouched until the
+                     prompt is answered.
     * `:confirm`  — a destructive action (list `d` delete, queue/history `d`
                     single-item remove, or queue/history `c` clear) is staged
                     behind a `y`/`n` prompt; `y` performs it, any other key
                     cancels. The underlying list/queue/history stays on screen
                     with the prompt shown in the footer.
     * `:history`  — browse watch history (an overlay opened with `H` from
-                    any browse mode, not over the player). `Enter` replays,
-                     `d` removes one entry, `c` clears all (via `:confirm`),
-                     `Esc` closes back to where it was opened.
+                    any browse mode, with or without a player running). `Enter`
+                     replays, `d` removes one entry, `c` clears all (via
+                     `:confirm`), `Esc` closes back to where it was opened.
     * `:explore_loading` / `:explore` — fetch and browse YouTube's recommended
                     feed, opened with `E` from a base/video/channel-playlist list.
                     Results are transient; `Esc` restores the underlying page.
@@ -54,7 +63,10 @@ defmodule Playmark.TUI do
   a spawned task and reports back via `handle_info/2`, so the runtime never blocks.
   Fetching and loading states accept `Esc`; Search, Explore, local directories,
   channel tabs, and playlist loads match request references and terminate tracked
-  tasks. Older add paths discard late results through mode guards.
+  tasks. Older add paths discard late results through mode guards. The single
+  deliberate exception is the quit path — see
+  `Playmark.TUI.PlaybackActions.stop_player/1`, which waits briefly for the player
+  to report so its resume checkpoint isn't lost to VM shutdown.
 
   This module is the `ExRatatui.App` shell. It owns the runtime callbacks and
   the browse-core half of the work, delegating everything else: state
@@ -151,11 +163,11 @@ defmodule Playmark.TUI do
        # cursor.
        queue_selected: 0,
        # The mode to restore when the queue-manage modal closes (the modal can be
-       # opened from a browse mode or :playing).
+       # opened from any browse mode).
        queue_return: :list,
        # Watch history (newest first), and — like the queue — a modal selection
        # index and the mode to restore when the history modal closes. The history
-       # modal is reachable from any browse mode (not over the running player).
+       # modal is reachable from any browse mode, with or without a player running.
        history: History.list_items(),
        history_selected: 0,
        history_return: :list,
@@ -203,11 +215,51 @@ defmodule Playmark.TUI do
     {:noreply, state}
   end
 
+  # `q` quits from any browse mode, but a running player has to be dealt with
+  # first — quitting outright would strand it and lose its saved position, so the
+  # player is asked to stop and the checkpoint is waited for. It does *not* ask:
+  # `X` is the only key whose job is stopping playback, and a prompt here would
+  # duplicate it while offering a choice that doesn't exist (the player goes down
+  # with the VM either way). Handled here, ahead of every per-mode key handler, for
+  # two reasons: no overlay module needs to read `playing` (which would break the
+  # state-key ownership invariant), and the queue modal's own `q` can't bypass it.
+  #
+  # The allow-list is exactly the modes whose own handler treats `q` as quit, and
+  # that precision is load-bearing: a bare `mode != :playing` guard also swallowed
+  # `q` in the text fields, so typing "queen" into a search box with a player
+  # running staged a quit prompt on the first letter. Preparation (`mode:
+  # :playing`) is absent too — there is no control socket yet, so the catch-all
+  # further down keeps swallowing `q` as before.
+  @stop_modes [
+    :list,
+    :videos,
+    :channel_playlists,
+    :search_results,
+    :explore,
+    :queue_manage,
+    :history,
+    :help
+  ]
+
+  def handle_event(%Event.Key{code: "q"}, %{playing: playing, mode: mode} = state)
+      when not is_nil(playing) and mode in @stop_modes do
+    {:stop, PlaybackActions.stop_player(state)}
+  end
+
+  # "X" stops the player and stays in the TUI. Intercepted here for the same two
+  # reasons as `q` above, and over the same modes for the third: `X` is also just a
+  # character when a text field has focus.
+  def handle_event(%Event.Key{code: "X"}, %{playing: playing, mode: mode} = state)
+      when not is_nil(playing) and mode in @stop_modes do
+    {:noreply, PlaybackActions.stop_playing(state)}
+  end
+
   # "Q" opens the queue manager from any browse mode, including Search and
-  # Explore, or over the running player. It's the only key :playing accepts; see
-  # the catch-all guard below.
+  # Explore. It is deliberately *not* accepted during `:playing`: preparation is a
+  # brief, uninterruptible wait, and browsing (with the queue on `Q`) returns by
+  # itself the moment the player is up.
   def handle_event(%Event.Key{code: "Q"}, %{mode: mode} = state)
-      when mode in [:list, :videos, :channel_playlists, :search_results, :explore, :playing] do
+      when mode in [:list, :videos, :channel_playlists, :search_results, :explore] do
     {:noreply, QueueActions.open_queue(state)}
   end
 
@@ -216,7 +268,8 @@ defmodule Playmark.TUI do
   end
 
   # "H" opens watch history from any browse mode, including Search and Explore.
-  # Unlike the queue's "Q", it is not accepted over the running player.
+  # Same allow-list as the queue's "Q": both work with a player running, and
+  # neither during `:playing`, which accepts no keys.
   def handle_event(%Event.Key{code: "H"}, %{mode: mode} = state)
       when mode in [:list, :videos, :channel_playlists, :search_results, :explore] do
     {:noreply, HistoryActions.open_history(state)}
@@ -346,6 +399,13 @@ defmodule Playmark.TUI do
 
   def handle_event(%Event.Key{code: "esc"}, %{mode: :channel_playlists_loading} = state) do
     {:noreply, Actions.cancel_channel_playlists(state)}
+  end
+
+  # Preparation is a long wait (stream resolve + caption probe + fetch + socket
+  # connect), so it cancels like every other loading mode. See cancel_play/1 for
+  # what "cancel" can actually mean here.
+  def handle_event(%Event.Key{code: "esc"}, %{mode: :playing} = state) do
+    {:noreply, PlaybackActions.cancel_play(state)}
   end
 
   def handle_event(%Event.Key{}, %{mode: mode} = state)
@@ -715,7 +775,14 @@ defmodule Playmark.TUI do
 
   defp local_result_status(entries, pending) do
     status = local_entries_status(entries, pending.name)
-    {:info, if(Map.get(pending, :refresh, false), do: "Refreshed: #{status}", else: status)}
+
+    case Map.get(pending, :delete) do
+      %{title: title} ->
+        {:info, "Deleted #{title}. #{status}"}
+
+      nil ->
+        {:info, if(Map.get(pending, :refresh, false), do: "Refreshed: #{status}", else: status)}
+    end
   end
 
   defp local_result_selection(entries, pending) do
@@ -733,6 +800,12 @@ defmodule Playmark.TUI do
       {0, ""}
     end
   end
+
+  # A delete failure is worded by the operation that failed, not here:
+  # `LocalFiles.delete/2` already names the path and the reason ("could not delete
+  # /a/b.mp4: permission denied"), so the directory wording below would misattribute
+  # it — the directory is fine, the file is not.
+  defp local_entries_error(%{delete: _delete}, reason), do: reason
 
   defp local_entries_error(pending, reason) do
     if pending.path == pending.root do

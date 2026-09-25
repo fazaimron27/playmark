@@ -21,7 +21,7 @@ defmodule Playmark.Config do
   ## File format
 
       # ~/.config/playmark/config.env — comments and blank lines are ignored
-      player = vlc              # :vlc (default), :mpv, or :ffplay
+      player = mpv              # :mpv (default), :vlc, or :ffplay
       max_height = 1080         # max video height for playback
       subtitles = true          # show captions (default true)
       subtitle_default = en     # first-choice caption language (default en)
