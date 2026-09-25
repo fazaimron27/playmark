@@ -73,9 +73,18 @@ defmodule Playmark.TUI.Filter do
   defp fields(_mode, %{view: :locals}), do: [:name, :path]
   defp fields(_mode, _state), do: []
 
-  # The mode the filter applies over: the base mode while the field is open
-  # (`:filter` → its `filter_return`), otherwise the current mode.
+  # The mode the filter applies over. Two modes are overlays rather than pages of
+  # their own, and both must resolve to the page underneath or what is navigated
+  # diverges from what is rendered: the filter field (`:filter` → its
+  # `filter_return`), and a confirmation (`:confirm` → its `confirm_return`).
+  #
+  # The `:confirm` clause matters because the cursor is read while one is staged —
+  # `perform_confirmed/2` re-derives the row on "y". `View.body/1` already
+  # re-dispatches on `confirm_return` for the same reason; without this, a confirm
+  # staged from `:videos` resolved its base list by *view* instead and handed back
+  # the wrong table (the registered locals, not the open folder).
   defp effective_mode(%{mode: :filter, filter_return: return}), do: return
+  defp effective_mode(%{mode: :confirm, confirm_return: return}), do: return
   defp effective_mode(%{mode: mode}), do: mode
 
   @doc """

@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Playmark do
       mix playmark
 
   Loads user configuration, verifies that `yt-dlp` and the configured media
-  player (`vlc` by default, or `mpv`/`ffplay`) are installed, then opens the TUI.
+  player (`mpv` by default, or `vlc`/`ffplay`) are installed, then opens the TUI.
   Use `j`/`k` to navigate, `a` to add a bookmark, `Enter` to play the selected
   video, and `q` to quit.
   """

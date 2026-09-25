@@ -20,8 +20,23 @@ defmodule Playmark.TUI.View do
 
   def render(state, frame) do
     area = %Rect{x: 0, y: 0, width: frame.width, height: frame.height}
-    footer_height = footer_height(state)
 
+    # Assembled as {constraint, widget} pairs rather than branched per shape: the
+    # input field and the now-playing strip are each independently present or
+    # absent, and enumerating the combinations would multiply. The footer stays
+    # last so status rendering is unaffected by anything inserted above it.
+    rows =
+      [{{:length, 3}, header(state)}, {{:min, 0}, body(state)}] ++
+        input_row(state) ++
+        now_playing_row(state) ++
+        [{{:length, footer_height(state)}, footer(state)}]
+
+    {constraints, widgets} = Enum.unzip(rows)
+
+    Enum.zip(widgets, Layout.split(area, :vertical, constraints))
+  end
+
+  defp input_row(state) do
     if state.mode in [
          :input,
          :fetching,
@@ -30,31 +45,45 @@ defmodule Playmark.TUI.View do
          :search_input,
          :search_filter
        ] do
-      [header_area, body_area, input_area, footer_area] =
-        Layout.split(area, :vertical, [
-          {:length, 3},
-          {:min, 0},
-          {:length, 3},
-          {:length, footer_height}
-        ])
-
-      [
-        {header(state), header_area},
-        {body(state), body_area},
-        {input_widget(state), input_area},
-        {footer(state), footer_area}
-      ]
+      [{{:length, 3}, input_widget(state)}]
     else
-      [header_area, body_area, footer_area] =
-        Layout.split(area, :vertical, [{:length, 3}, {:min, 0}, {:length, footer_height}])
-
-      [
-        {header(state), header_area},
-        {body(state), body_area},
-        {footer(state), footer_area}
-      ]
+      []
     end
   end
+
+  # A one-row strip naming what is playing, shown once the player is up and the
+  # browse mode has been restored. Absent during preparation, where the body's
+  # step checklist already reports every stage, so a strip would only duplicate
+  # it — and absent when nothing is playing.
+  #
+  # Borderless on purpose: a bordered block costs three rows, and two extra rows
+  # of the list underneath are worth more than a frame around one line.
+  defp now_playing_row(%{playing: playing, mode: mode})
+       when is_map(playing) and mode != :playing do
+    [{{:length, 1}, now_playing_strip(playing)}]
+  end
+
+  defp now_playing_row(_state), do: []
+
+  defp now_playing_strip(playing) do
+    %Paragraph{text: strip_line(playing), style: %Style{fg: :cyan}}
+  end
+
+  defp strip_line(playing) do
+    title = Map.get(playing, :title) || "Unknown"
+    "▶ #{title}#{strip_author(Map.get(playing, :author))}  [#{Map.get(playing, :player)}]"
+  end
+
+  # The channel, when known. A nil or blank author is dropped along with its
+  # separator, rather than rendering a dangling dash.
+  defp strip_author(author) when is_binary(author) do
+    case String.trim(author) do
+      "" -> ""
+      trimmed -> " — #{trimmed}"
+    end
+  end
+
+  defp strip_author(_author), do: ""
 
   defp header(state) do
     %Paragraph{
@@ -65,8 +94,10 @@ defmodule Playmark.TUI.View do
     }
   end
 
-  defp section(%{mode: :confirm, confirm_return: :queue_manage}), do: "Queue"
-  defp section(%{mode: :confirm, confirm_return: :history}), do: "History"
+  # A confirmation names whatever page staged it, for the same reason its body
+  # renders that page (see body/1).
+  defp section(%{mode: :confirm, confirm_return: return} = state) when return != :confirm,
+    do: section(%{state | mode: return})
 
   # The queue-manage modal names itself, whatever base view it was opened over.
   defp section(%{mode: :queue_manage}), do: "Queue"
@@ -118,15 +149,17 @@ defmodule Playmark.TUI.View do
       state.mode == :resume ->
         body(%{state | mode: state.resume.display_mode})
 
-      # A queue-clear confirmation keeps the queue on screen (the prompt shows in
-      # the footer) so the user sees what they're about to wipe. A list-delete
-      # confirmation needs no special branch — it falls through to the view-based
-      # clauses below, which don't gate on mode, so the list stays visible.
-      state.mode == :confirm and confirm_over_queue?(state) ->
-        queue_body(state)
-
-      state.mode == :confirm and confirm_over_history?(state) ->
-        history_body(state)
+      # A confirmation is an overlay over the page that staged it, so re-dispatch
+      # on the mode it will return to — that page stays on screen with the prompt
+      # in the footer. Mirrors the :resume branch above, and subsumes the queue and
+      # history cases that used to need dedicated branches here.
+      #
+      # Before this, only a confirm staged from `:list` rendered correctly, by
+      # falling through to the view clauses below. `q` with a player running is the
+      # first confirm reachable from `:videos`, Search, Explore, and channel
+      # playlists, which is what exposed it.
+      state.mode == :confirm and state.confirm_return != :confirm ->
+        body(%{state | mode: state.confirm_return})
 
       state.mode == :queue_manage ->
         queue_body(state)
@@ -365,6 +398,7 @@ defmodule Playmark.TUI.View do
       b: bookmark (video lists)
       e: queue (tail)   n: play next (after head)
       r: refresh (local folder)
+      d in a local folder: delete that file from disk (permanent)
 
     Channel
       v: videos   s: streams   p: playlists
@@ -380,6 +414,15 @@ defmodule Playmark.TUI.View do
 
     Filter (/)
       type to narrow   Enter/Esc: keep   Esc again: clear
+
+    While something is playing
+      browsing stays open; the strip above the footer names the video
+      Enter on another video: replaces it (mpv/VLC only)
+      X: stop the player, stay in playmark (mpv/VLC only)
+      q: stop the player and quit
+
+    While a play is being prepared
+      Esc: cancel and go back (the player never starts)
 
     Esc / ?: close this help
     """
@@ -516,18 +559,6 @@ defmodule Playmark.TUI.View do
       format_views(Map.get(video, :views))
     ]
   end
-
-  # True when a confirmation is staged over the queue modal (clearing the queue),
-  # so the body keeps showing the queue behind the prompt rather than the base
-  # view. A list-delete confirmation (confirm_return: :list) falls through to the
-  # normal view branches instead.
-  defp confirm_over_queue?(%{mode: :confirm, confirm_return: :queue_manage}), do: true
-  defp confirm_over_queue?(_state), do: false
-
-  # True when a confirmation is staged over the history modal (clearing history), so
-  # the body keeps showing the history behind the prompt rather than the base view.
-  defp confirm_over_history?(%{mode: :confirm, confirm_return: :history}), do: true
-  defp confirm_over_history?(_state), do: false
 
   # True while browsing a source list or playing an item launched from it. During
   # playback this retains the source label in the header; the body itself is the
@@ -971,10 +1002,14 @@ defmodule Playmark.TUI.View do
 
   defp footer_content(%{mode: :playing, playing: %{stage: stage}})
        when stage in [:starting, :resolving, :captions],
-       do: {"Preparing playback… | Q: queue", :cyan}
+       do: {"Preparing playback… (Esc to cancel)", :cyan}
 
+  # Only reachable while the player is launching: the backend has reported the
+  # :playing stage but Control hasn't yet said whether its socket came up, so the
+  # unlock is still pending. Browsing returns on its own the moment it does — the
+  # user is not waiting on the player to be closed.
   defp footer_content(%{mode: :playing}),
-    do: {"The external player controls playback — close it to return | Q: queue", :cyan}
+    do: {"Starting player… (Esc to cancel)", :cyan}
 
   defp footer_content(%{mode: :channel_playlists, channel_playlist_filter: term})
        when term != "" do
@@ -1000,10 +1035,13 @@ defmodule Playmark.TUI.View do
   end
 
   # Local files can't be bookmarked (no YouTube URL to look up), so its video
-  # footer drops the bookmark hint.
+  # footer drops the bookmark hint and names `d` instead — which here deletes the
+  # file from disk, not a row (see confirm_delete_local_file/1).
   defp footer_content(%{mode: :videos, view: :locals}),
     do:
-      video_footer("j/k | Enter: open/play | e: queue file | r: refresh | /: filter | Esc: back")
+      video_footer(
+        "j/k | Enter: open/play | e: queue file | d: del file | r: refresh | /: filter | Esc: back"
+      )
 
   # A subscription listing (channel_url set) exposes all three channel tabs.
   defp footer_content(%{mode: :videos, channel_url: url}) when is_binary(url),

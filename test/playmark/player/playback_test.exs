@@ -154,6 +154,33 @@ defmodule Playmark.Player.PlaybackTest do
     end
   end
 
+  # ffplay launches through run/2 rather than Control, so it needs the same
+  # pre-launch stop check. Without it, cancelling during preparation left an
+  # ffplay running that the TUI had already forgotten — worse than the flashing
+  # window, because nothing could stop it afterwards.
+  describe "run/2 honours a stop requested during preparation" do
+    test "does not launch when a stop is already in the mailbox" do
+      path = Path.join(System.tmp_dir!(), "playmark-run-#{System.unique_integer([:positive])}")
+
+      task =
+        Task.async(fn ->
+          send(self(), :playmark_stop)
+          Playback.run("touch", [path])
+        end)
+
+      assert Task.await(task, 2_000) == {:ok, :stopped}
+      refute File.exists?(path)
+    end
+
+    test "launches normally when no stop was requested" do
+      path = Path.join(System.tmp_dir!(), "playmark-run-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm(path) end)
+
+      assert Playback.run("touch", [path]) == {:ok, :unknown}
+      assert File.exists?(path)
+    end
+  end
+
   defp restore(key, {:ok, value}), do: Application.put_env(:playmark, key, value)
   defp restore(key, :error), do: Application.delete_env(:playmark, key)
 

@@ -81,6 +81,64 @@ defmodule Playmark.Player.VlcTest do
       refute Enum.any?(args, &String.starts_with?(&1, "--meta-artist"))
     end
 
+    # VLC's own `adaptive` demuxer aborts the whole input when the *first* HLS
+    # segment fails to download, which is where YouTube's 403s land. Forcing
+    # ffmpeg's demuxer makes it retry and skip instead — measured against a local
+    # HLS stream with segment 0 returning 403: adaptive died, avformat played.
+    #
+    # It rides on the MRL rather than a global `--demux=` flag, because the flag
+    # is global in the literal sense: VLC applied it to the subtitle sidecar too,
+    # opening a .vtt with ffmpeg instead of its own `webvtt` demuxer and killing
+    # playback with "Unidentified codec". See the sidecar test below.
+    test "forces ffmpeg's demuxer when asked, scoped to the stream MRL" do
+      opts = Map.put(@opts, :force_demux, "avformat")
+
+      args = Vlc.launch_args(["https://example.com/muxed"], nil, opts)
+
+      assert "https/avformat://example.com/muxed" in args
+      refute "https://example.com/muxed" in args
+      refute Enum.any?(args, &String.starts_with?(&1, "--demux="))
+    end
+
+    # The regression this scoping exists for: a global --demux=avformat leaked
+    # onto the `--sub-file` slave, so VLC opened the .vtt with avformat, found no
+    # spu decoder for what came out, and failed the whole play with "Unidentified
+    # codec". Verified against VLC 3.0.23 — the sidecar must stay a plain path so
+    # VLC picks its native `webvtt` demuxer.
+    test "leaves the subtitle sidecar on its own demuxer" do
+      opts = Map.put(@opts, :force_demux, "avformat")
+
+      args = Vlc.launch_args(["https://example.com/muxed"], "/tmp/subs.vtt", opts)
+
+      assert "--sub-file=/tmp/subs.vtt" in args
+      refute Enum.any?(args, &String.starts_with?(&1, "--demux="))
+    end
+
+    # A split rendition plays audio as a slave input, which is HLS too and needs
+    # the same tolerance — it would otherwise fall back to `adaptive`.
+    test "scopes the demuxer onto the audio slave as well" do
+      opts = Map.put(@opts, :force_demux, "avformat")
+
+      args =
+        Vlc.launch_args(
+          ["https://example.com/video", "https://example.com/audio"],
+          nil,
+          opts
+        )
+
+      assert "https/avformat://example.com/video" in args
+      assert "--input-slave=https/avformat://example.com/audio" in args
+    end
+
+    # Local files never hit the HLS path, and forcing ffmpeg's demuxer for every
+    # container VLC handles natively is a bigger change than the problem needs.
+    test "leaves the demuxer alone when not asked" do
+      args = Vlc.launch_args(["/tmp/clip.mp4"], nil, @opts)
+
+      refute Enum.any?(args, &String.starts_with?(&1, "--demux="))
+      assert "/tmp/clip.mp4" in args
+    end
+
     test "adds a dedicated RC socket and resume offset before the input" do
       opts =
         Map.merge(@opts, %{

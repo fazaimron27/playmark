@@ -161,6 +161,12 @@ defmodule Playmark.TUI.Actions do
     %{delete_selected(state) | mode: :list, confirm: nil}
   end
 
+  # The one perform clause that delegates: its body needs the local browser's
+  # pending/read machinery, so it lives beside that rather than here. Unlike the
+  # clauses around it this one does not set `mode` — the re-read that follows the
+  # delete commits it, and it is the `:videos` the confirmation was staged from.
+  defp perform_confirmed(:delete_local_entry, state), do: delete_local_entry(state)
+
   defp perform_confirmed(:clear_queue, state) do
     %{QueueActions.clear_queue(state) | mode: :queue_manage, confirm: nil}
   end
@@ -256,6 +262,15 @@ defmodule Playmark.TUI.Actions do
   end
 
   def handle_videos_key("b", state), do: {:noreply, bookmark_selected_video(state)}
+
+  # "d" deletes the selected local file from disk — the destructive half of the local
+  # browser, so it is staged behind a confirmation like the list's delete. Only for a
+  # local listing: in a channel or playlist listing the rows are YouTube videos with
+  # nothing on disk to remove, so there `d` stays the no-op it has always been (the
+  # `_code` fallthrough below). Removing a saved *container* is still `d` from the
+  # list, which unregisters it without touching the disk.
+  def handle_videos_key("d", %{view: :locals} = state),
+    do: {:noreply, confirm_delete_local_file(state)}
 
   # "e" appends the selected channel/playlist video or local file to the
   # playback queue, carrying its own local? flag so the play path is right later.
@@ -928,6 +943,62 @@ defmodule Playmark.TUI.Actions do
     end
   end
 
+  # `d` on a local file stages the delete the way the list's `d` stages its own: the
+  # row and a prompt go into `confirm`, mode flips, and the delete runs from
+  # handle_confirm_key/2 on "y". A folder is refused here rather than staged and then
+  # refused — asking a question whose only answer is no is worse than not asking. The
+  # cursor survives :confirm (nothing navigates it), which is how
+  # perform_confirmed/2 re-derives the same row on "y".
+  defp confirm_delete_local_file(state) do
+    case selected_item(state) do
+      nil ->
+        state
+
+      %{kind: :directory} ->
+        %{state | status: {:info, "Only files can be deleted"}}
+
+      %{title: title} ->
+        %{
+          state
+          | mode: :confirm,
+            confirm_return: :videos,
+            confirm: %{action: :delete_local_entry, prompt: ~s(Delete file "#{title}" from disk?)},
+            status: nil
+        }
+    end
+  end
+
+  # Confirming a local delete re-reads the folder as well as deleting the file, in one
+  # task. The re-read is not optional: the row just left the directory and nothing else
+  # would notice until `r`. It reports through the ordinary local-entries message, so
+  # the commit half is the same handler a plain read uses — `pending.delete` is what
+  # tells that handler which of the two this was.
+  defp delete_local_entry(state) do
+    case selected_item(state) do
+      %{title: title, url: path} when is_binary(path) ->
+        pending = %{
+          path: state.local_path,
+          name: state.channel_name,
+          root: state.local_root,
+          root_name: state.local_root_name,
+          stack: state.local_stack,
+          refresh: true,
+          filter: state.filter,
+          selected: state.selected,
+          selected_id: selected_id(state),
+          delete: %{path: path, title: title}
+        }
+
+        state
+        |> fetch_local_entries(pending, :videos)
+        |> Map.put(:confirm, nil)
+
+      # The row vanished between staging and confirming; nothing to delete.
+      _row ->
+        %{state | mode: :videos, confirm: nil}
+    end
+  end
+
   defp refresh_local_entries(state) do
     pending = %{
       path: state.local_path,
@@ -960,7 +1031,7 @@ defmodule Playmark.TUI.Actions do
       Task.start(fn ->
         result =
           try do
-            local_files.list_entries(pending.path, pending.root)
+            run_local_read(local_files, pending)
           rescue
             error -> {:error, Exception.message(error)}
           end
@@ -975,9 +1046,31 @@ defmodule Playmark.TUI.Actions do
         local_pending: pending,
         local_request_ref: request_ref,
         local_task_pid: task_pid,
-        status: {:info, "#{local_read_action(pending)} #{pending.name}… (Esc to cancel)"}
+        status: {:info, local_read_status(pending)}
     }
   end
+
+  # A delete names the *file* it is removing, since that is what the wait is about; a
+  # read names the *folder* it is reading, since that is the whole of what it does.
+  defp local_read_status(%{delete: %{title: title}}),
+    do: "Deleting #{title}… (Esc to cancel)"
+
+  defp local_read_status(pending),
+    do: "#{local_read_action(pending)} #{pending.name}… (Esc to cancel)"
+
+  # A pending carrying `delete` removes the file first and only then re-reads, so one
+  # round trip both performs and reflects the deletion. A delete that fails stops
+  # where it is: there is nothing new to list, and its own reason (which names the
+  # path) is more useful than a listing status would be.
+  defp run_local_read(local_files, %{delete: %{path: path}} = pending) do
+    case local_files.delete(path, pending.root) do
+      :ok -> local_files.list_entries(pending.path, pending.root)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp run_local_read(local_files, pending),
+    do: local_files.list_entries(pending.path, pending.root)
 
   defp local_read_action(%{refresh: true}), do: "Refreshing"
   defp local_read_action(_pending), do: "Reading"

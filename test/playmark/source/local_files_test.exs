@@ -134,5 +134,88 @@ defmodule Playmark.Source.LocalFilesTest do
     end
   end
 
+  describe "delete/2" do
+    test "deletes a media file inside the registered root", %{dir: dir} do
+      touch(dir, "doomed.mp4")
+      touch(dir, "keeper.mp4")
+
+      assert :ok = LocalFiles.delete(Path.join(dir, "doomed.mp4"), dir)
+
+      refute File.exists?(Path.join(dir, "doomed.mp4"))
+      assert File.exists?(Path.join(dir, "keeper.mp4"))
+    end
+
+    test "deletes a file inside a nested folder", %{dir: dir} do
+      child = Path.join(dir, "season")
+      File.mkdir_p!(child)
+      touch(child, "ep1.mp4")
+
+      assert :ok = LocalFiles.delete(Path.join(child, "ep1.mp4"), dir)
+      refute File.exists?(Path.join(child, "ep1.mp4"))
+    end
+
+    test "rejects a path outside the registered root", %{dir: dir} do
+      outside = Path.join(System.tmp_dir!(), "playmark_delete_outside_#{unique()}")
+      File.mkdir_p!(outside)
+      on_exit(fn -> File.rm_rf!(outside) end)
+      touch(outside, "innocent.mp4")
+
+      assert {:error, reason} = LocalFiles.delete(Path.join(outside, "innocent.mp4"), dir)
+      assert reason =~ "could not delete"
+      assert reason =~ "outside registered directory"
+      assert File.exists?(Path.join(outside, "innocent.mp4"))
+    end
+
+    test "rejects a file reached through a directory symlink", %{dir: dir} do
+      outside = Path.join(System.tmp_dir!(), "playmark_delete_linked_#{unique()}")
+      File.mkdir_p!(outside)
+      on_exit(fn -> File.rm_rf!(outside) end)
+      touch(outside, "innocent.mp4")
+
+      child = Path.join(dir, "child")
+      File.mkdir_p!(child)
+      File.rm_rf!(child)
+      File.ln_s!(outside, child)
+
+      assert {:error, reason} = LocalFiles.delete(Path.join(child, "innocent.mp4"), dir)
+      assert reason =~ "not a browsable directory"
+      assert File.exists?(Path.join(outside, "innocent.mp4"))
+    end
+
+    test "refuses to delete a directory", %{dir: dir} do
+      child = Path.join(dir, "season")
+      File.mkdir_p!(child)
+
+      assert {:error, reason} = LocalFiles.delete(child, dir)
+      assert reason =~ "not a file"
+      assert File.dir?(child)
+    end
+
+    test "refuses to delete the registered root itself", %{dir: dir} do
+      assert {:error, reason} = LocalFiles.delete(dir, dir)
+      assert reason =~ "could not delete"
+      assert File.dir?(dir)
+    end
+
+    test "returns an error for a missing file and leaves it missing", %{dir: dir} do
+      assert {:error, reason} = LocalFiles.delete(Path.join(dir, "ghost.mp4"), dir)
+      assert reason =~ "could not delete"
+      refute File.exists?(Path.join(dir, "ghost.mp4"))
+    end
+
+    test "removes a file symlink and leaves its target intact", %{dir: dir} do
+      touch(dir, "target.mp4")
+      link = Path.join(dir, "link.mp4")
+      File.ln_s!(Path.join(dir, "target.mp4"), link)
+
+      assert :ok = LocalFiles.delete(link, dir)
+
+      refute File.exists?(link)
+      assert File.exists?(Path.join(dir, "target.mp4"))
+    end
+  end
+
   defp touch(dir, name), do: File.write!(Path.join(dir, name), "")
+
+  defp unique, do: System.unique_integer([:positive])
 end

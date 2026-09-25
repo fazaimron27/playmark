@@ -218,8 +218,8 @@ defmodule Playmark.Player.Playback do
     do: {:error, "unsupported player: #{inspect(other)}"}
 
   @doc """
-  The configured player. Falls back to `:mpv` only when no application setting
-  exists; the shipped configuration selects `:vlc`.
+  The configured player. `:mpv` both in the shipped configuration and as the
+  fallback here when no setting exists, so the two agree.
   """
   def player, do: Application.get_env(:playmark, :player, :mpv)
 
@@ -293,15 +293,50 @@ defmodule Playmark.Player.Playback do
   Runs `executable` with `args`, returning `{:ok, :unknown}` on exit 0 or
   `{:error, reason}`.
 
-  Shared by the player backends; blocks for the child's lifetime.
+  Shared by the player backends; blocks for the child's lifetime. Returns
+  `{:ok, :stopped}` without launching when a stop is already pending — see
+  `stop_requested?/0`.
   """
   def run(executable, args) do
-    case System.cmd(executable, args, stderr_to_stdout: true) do
-      {_output, 0} ->
-        {:ok, :unknown}
+    if stop_requested?() do
+      {:ok, :stopped}
+    else
+      case System.cmd(executable, args, stderr_to_stdout: true) do
+        {_output, 0} ->
+          {:ok, :unknown}
 
-      {output, code} ->
-        {:error, "#{executable} exited with #{code}: #{String.trim(output)}"}
+        {output, code} ->
+          {:error, "#{executable} exited with #{code}: #{String.trim(output)}"}
+      end
+    end
+  end
+
+  @doc """
+  Whether the TUI has already asked this play to stop. **Consumes** the message.
+
+  Preparation is long — a `yt-dlp -g` resolve, a metadata probe, a caption
+  download — and `Esc` cancels it (`Playmark.TUI.PlaybackActions.cancel_play/1`).
+  The cancel can only *send* `:playmark_stop`, because the task is blocked inside
+  `System.cmd` and cannot act on it until that returns. So the message waits in
+  the mailbox, and without this check the player launched anyway and was quit a
+  moment later by `Playmark.Player.Control`'s monitor loop — a window flashing
+  open and shut. Worse on ffplay, which has no monitor loop: the player launched
+  and kept running with no `playing` state left to stop it from.
+
+  Called at the last possible moment before a launch, by `run/2` here and by
+  `Playmark.Player.Control.run/4`. A stop arriving *after* the check still lands
+  in the mailbox and is handled by the monitor loop as before, so the flash is
+  narrowed to that window rather than removed outright — it cannot be removed
+  entirely, since a launch is not atomic with a mailbox read.
+
+  Consuming is deliberate: the message must not survive to be re-read by the
+  monitor loop, which would quit a player nobody asked to stop.
+  """
+  def stop_requested? do
+    receive do
+      :playmark_stop -> true
+    after
+      0 -> false
     end
   end
 

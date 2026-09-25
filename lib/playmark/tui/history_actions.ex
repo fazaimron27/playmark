@@ -10,9 +10,9 @@ defmodule Playmark.TUI.HistoryActions do
   never re-fetches. Unlike the queue, a rewatch upserts on the URL rather than
   appending, so the list holds one row per video (see `Playmark.History`).
 
-  The modal shape mirrors `Playmark.TUI.QueueActions` — open over a browse mode,
-  Esc restores it, destructive keys stage through `:confirm` — with one
-  difference: it is never opened over the running player.
+  The modal shape mirrors `Playmark.TUI.QueueActions`: open over any browse mode
+  (with or without a player running), Esc restores it, and destructive keys stage
+  through `:confirm`.
   """
 
   alias Playmark.TUI.{Impl, Nav, PlaybackActions, QueueActions, Status}
