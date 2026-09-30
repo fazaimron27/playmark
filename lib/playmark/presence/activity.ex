@@ -26,6 +26,26 @@ defmodule Playmark.Presence.Activity do
   trailing `…`, which is counted inside the budget for the same reason: a
   truncation that lands back over the limit is a rejection, not a truncation.
 
+  ## The channel link
+
+  The `state` line carries the channel name, and `state_url` makes it
+  clickable. There is no channel URL to point at: only a subscription persists
+  one, and the lists a video is usually played from — bookmarks, queue,
+  history — keep the channel *name* and nothing else. So the link is a YouTube
+  search for that name, the keyless tier cliamp-plugin's artist link falls
+  back to. It needs no id, no request, and no new column, and it therefore
+  works on every play path rather than on the ones that happen to carry a URL.
+
+  It is built from the raw name rather than from the truncated `state` text,
+  so the ellipsis a long name displays never becomes part of what is searched
+  for. The name is cut to fit the documented 256-character limit on
+  `state_url` — read from the docs rather than measured, and applied
+  defensively: like an over-long text field, an over-long URL is a rejection
+  of the whole activity rather than a harmless truncation. The cut runs
+  codepoint by codepoint and re-encodes each piece, because slicing the
+  *encoded* string can land inside a `%E6` escape and leave a URL nothing can
+  parse.
+
   ## Why milliseconds
 
   Timestamps are Unix milliseconds on both fields, always. Discord accepts
@@ -51,6 +71,18 @@ defmodule Playmark.Presence.Activity do
   @thumbnail "https://i.ytimg.com/vi/~s/mqdefault.jpg"
 
   @watch_label "Watch on YouTube"
+
+  # The channel link: no channel URL exists on the play path, so the card points
+  # at a search for the channel name instead (see the moduledoc).
+  @search_route "https://www.youtube.com/results?search_query="
+
+  # Discord's documented cap on `details_url`/`state_url`. `details_url` is
+  # always a bare video URL and cannot reach it; this one can, because a name
+  # costs up to nine characters per codepoint once percent-encoded.
+  @url_max_chars 256
+
+  # Precomputed because the route is pure ASCII, so bytes and characters agree.
+  @query_max_chars @url_max_chars - byte_size(@search_route)
 
   @doc """
   The activity object for `card`, or `nil` when there is nothing to show.
@@ -85,10 +117,35 @@ defmodule Playmark.Presence.Activity do
   end
 
   defp put_state(activity, %{author: author}) when is_binary(author) and author != "" do
-    Map.put(activity, "state", truncate_units(author, @text_max_units))
+    activity
+    |> Map.put("state", truncate_units(author, @text_max_units))
+    |> Map.put("state_url", search_url(author))
   end
 
   defp put_state(activity, _card), do: activity
+
+  defp search_url(name), do: @search_route <> search_query(name, @query_max_chars)
+
+  # Encodes `name` one codepoint at a time, keeping whole pieces until the
+  # budget runs out. Encoding the whole name and then cutting the result would
+  # be the same URL right up until it wasn't: a cut through a multi-byte
+  # escape leaves something `URI.decode_query/1` raises on, and Discord would
+  # refuse the entire activity rather than the one field.
+  defp search_query(name, budget) do
+    name
+    |> String.to_charlist()
+    |> Enum.reduce_while({[], 0}, fn codepoint, {pieces, used} ->
+      encoded = URI.encode_www_form(<<codepoint::utf8>>)
+      size = byte_size(encoded)
+
+      if used + size <= budget,
+        do: {:cont, {[encoded | pieces], used + size}},
+        else: {:halt, {pieces, used}}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+    |> Enum.join()
+  end
 
   defp put_timestamps(activity, %{start_ms: start_ms} = card) when is_integer(start_ms) do
     Map.put(activity, "timestamps", timestamps(start_ms, Map.get(card, :duration_ms)))

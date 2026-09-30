@@ -2,6 +2,7 @@ defmodule Playmark.Presence.ActivityTest do
   use ExUnit.Case, async: true
 
   alias Playmark.Presence.Activity
+  alias Playmark.YouTube
 
   @url "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
@@ -50,6 +51,68 @@ defmodule Playmark.Presence.ActivityTest do
     assert Activity.build(card(%{author: nil}))["state"] == nil
     refute Map.has_key?(Activity.build(card(%{author: nil})), "state")
     refute Map.has_key?(Activity.build(card(%{author: ""})), "state")
+
+    # The link belongs to the channel, so it goes with the channel: a card that
+    # names no one has nothing to search for.
+    refute Map.has_key?(Activity.build(card(%{author: nil})), "state_url")
+    refute Map.has_key?(Activity.build(card(%{author: ""})), "state_url")
+  end
+
+  test "links the channel to a YouTube search for it" do
+    activity = Activity.build(card())
+
+    assert activity["state_url"] ==
+             "https://www.youtube.com/results?search_query=Some+Channel"
+
+    # Whatever this builds has to survive `YouTube.validate/1`, which is what
+    # stands between the card and Discord. A URL Discord refuses costs the whole
+    # activity, not the one field.
+    assert YouTube.validate(activity["state_url"]) == {:ok, activity["state_url"]}
+  end
+
+  test "escapes a channel name so the search link stays a valid query" do
+    assert Activity.build(card(%{author: "AC/DC"}))["state_url"] ==
+             "https://www.youtube.com/results?search_query=AC%2FDC"
+
+    # A space encodes as `+` and an ampersand as `%26`; leaving either raw would
+    # end the query parameter early and search for the wrong thing.
+    assert Activity.build(card(%{author: "A & B"}))["state_url"] ==
+             "https://www.youtube.com/results?search_query=A+%26+B"
+  end
+
+  test "the link carries the whole channel name even when the text is cut" do
+    author = String.duplicate("b", 200)
+    activity = Activity.build(card(%{author: author}))
+
+    # The display cap is a rendering limit, not a fact about the channel, so the
+    # ellipsis it adds must not become part of what gets searched for.
+    assert activity["state"] == String.duplicate("b", 127) <> "…"
+    refute activity["state_url"] =~ "…"
+
+    query = URI.parse(activity["state_url"]).query
+
+    assert query |> URI.decode_query() |> Map.fetch!("search_query") == author
+  end
+
+  # `state_url` is documented as capped at 256 characters — read from the docs
+  # rather than measured here, and applied defensively for the same reason the
+  # text caps are: an over-long field is a rejection, not a truncation.
+  test "caps a long search link, cutting between codepoints rather than inside an escape" do
+    author = String.duplicate("漢", 200)
+    url = Activity.build(card(%{author: author}))["state_url"]
+
+    assert String.length(url) <= 256
+    assert String.valid?(url)
+
+    # Each of these codepoints is nine characters encoded, so a cut by length —
+    # of the string or of its bytes — would land inside a `%E6…` escape and
+    # produce a query nothing can decode. Cutting the *name* cannot: every piece
+    # is encoded whole before it is counted.
+    [_, query] = String.split(url, "?")
+    decoded = query |> URI.decode_query() |> Map.fetch!("search_query")
+
+    assert String.valid?(decoded)
+    assert String.starts_with?(author, decoded)
   end
 
   test "drops every URL when the video URL is malformed" do
