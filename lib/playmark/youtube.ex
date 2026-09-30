@@ -19,6 +19,11 @@ defmodule Playmark.YouTube do
   # short-link host; the `music.`/`m.` subdomains appear on shared links.
   @hosts ~w(youtube.com www.youtube.com m.youtube.com music.youtube.com youtu.be)
 
+  # A YouTube video id is exactly 11 characters of this alphabet. Checking the
+  # shape rather than trusting the presence of a `v` parameter is what keeps a
+  # truncated or hand-edited URL from reaching Discord as a broken image link.
+  @video_id ~r/^[A-Za-z0-9_-]{11}$/
+
   # The channel-page tab segments YouTube appends to a channel URL (Videos,
   # Streams, Shorts, etc.). We strip a trailing one so a subscription stores the
   # canonical bare channel URL, and the app decides which tab to fetch.
@@ -94,6 +99,59 @@ defmodule Playmark.YouTube do
   end
 
   def canonical_playlist_url(_url), do: {:error, "not a YouTube playlist URL"}
+
+  @doc """
+  Extracts the video id from a YouTube watch URL or `youtu.be` short link.
+
+  Returns `nil` for anything else — a channel, a playlist, another host, a
+  local path, junk, or a non-binary. Callers use `nil` as "there is no id",
+  which is a legal state everywhere it is consumed (the presence card simply
+  omits its thumbnail).
+
+  Pure: no network, no IO. The id is derived from the URL playmark already
+  holds, so a thumbnail costs no request.
+  """
+  def video_id(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{host: host, path: path, query: query} when is_binary(host) ->
+        case String.downcase(host) do
+          "youtu.be" -> path |> first_segment()
+          host when host in @hosts -> if path == "/watch", do: from_query(query), else: nil
+          _other -> nil
+        end
+
+      _other ->
+        nil
+    end
+  end
+
+  def video_id(_url), do: nil
+
+  # A short link's id is its first non-empty path segment, so a trailing slash
+  # or a fragment does not change the answer.
+  defp first_segment(path) when is_binary(path) do
+    path |> String.split("/", trim: true) |> List.first() |> clean_id()
+  end
+
+  defp first_segment(_path), do: nil
+
+  defp from_query(query) when is_binary(query) do
+    case URI.decode_query(query) do
+      %{"v" => value} -> clean_id(value)
+      _other -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp from_query(_query), do: nil
+
+  defp clean_id(value) when is_binary(value) do
+    value = String.trim(value)
+    if Regex.match?(@video_id, value), do: value, else: nil
+  end
+
+  defp clean_id(_value), do: nil
 
   # Drops a trailing "/<tab>" (or "/<tab>/") when <tab> is a known channel tab,
   # preserving the rest of the path. A path without a trailing tab is returned
