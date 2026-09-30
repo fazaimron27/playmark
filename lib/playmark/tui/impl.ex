@@ -46,4 +46,6 @@ defmodule Playmark.TUI.Impl do
     do: Application.get_env(:playmark, :youtube_playlist_impl, YouTubePlaylist)
 
   def history, do: Application.get_env(:playmark, :history_impl, History)
+
+  def presence, do: Application.get_env(:playmark, :presence_impl, Playmark.Presence)
 end

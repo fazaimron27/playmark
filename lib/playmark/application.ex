@@ -13,7 +13,8 @@ defmodule Playmark.Application do
 
     children = [
       Playmark.Repo,
-      Playmark.Cache
+      Playmark.Cache,
+      Playmark.Presence
     ]
 
     opts = [strategy: :one_for_one, name: Playmark.Supervisor]
