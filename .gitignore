@@ -29,3 +29,7 @@ playmark-*.tar
 *.db
 *.db-shm
 *.db-wal
+
+# Local working docs — specs and implementation plans (superpowers workflow).
+# Note this is /docs/, distinct from the ExDoc output in /doc/ above.
+/docs/
