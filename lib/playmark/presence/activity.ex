@@ -15,11 +15,16 @@ defmodule Playmark.Presence.Activity do
   rather than sent blank — so the URL is passed through
   `Playmark.YouTube.validate/1` and dropped when it fails.
 
-  **Truncation units differ by field.** Visible text (`details`, `state`) is
-  measured in runes, so a CJK or emoji title is not cut short. The hover text
-  (`assets.large_text`) is capped in *bytes*, because that is Discord's own
-  limit — and a cut mid-codepoint is itself malformed, so it backs off to the
-  boundary.
+  **Text is capped in UTF-16 code units.** `details`, `state`, and the hover
+  `assets.large_text` share Discord's limit of 128, and that limit counts
+  UTF-16 code units — not runes and not bytes. Measured against a real client:
+  128 ASCII runes are accepted and 129 rejected; 128 CJK runes are accepted
+  despite being 384 bytes; 128 astral emoji are rejected, because each costs
+  two units. Capping by rune count would let an emoji-heavy title through, and
+  Discord rejects the *whole activity* — not the offending field — so the card
+  would disappear rather than shorten. An over-long value is cut to fit with a
+  trailing `…`, which is counted inside the budget for the same reason: a
+  truncation that lands back over the limit is a rejection, not a truncation.
 
   ## Why milliseconds
 
@@ -35,9 +40,13 @@ defmodule Playmark.Presence.Activity do
 
   alias Playmark.YouTube
 
-  @details_max_runes 48
-  @state_max_runes 40
-  @hover_max_bytes 128
+  # Discord's own ceiling for every text field on the card, in the unit it
+  # actually counts. One cap for all three: the title, the channel, and the
+  # hover are the same strings shown in different places, and inventing a
+  # tighter cap for one of them only means showing less of the same thing.
+  @text_max_units 128
+
+  @ellipsis "…"
 
   @thumbnail "https://i.ytimg.com/vi/~s/mqdefault.jpg"
 
@@ -54,7 +63,7 @@ defmodule Playmark.Presence.Activity do
       "type" => 3,
       "status_display_type" => 1,
       "instance" => false,
-      "details" => truncate_runes(title, @details_max_runes)
+      "details" => truncate_units(title, @text_max_units)
     }
     # URL-bearing fields are added first: the assets and the button below both
     # read `details_url`, so a URL that failed validation removes all three at
@@ -76,7 +85,7 @@ defmodule Playmark.Presence.Activity do
   end
 
   defp put_state(activity, %{author: author}) when is_binary(author) and author != "" do
-    Map.put(activity, "state", truncate_runes(author, @state_max_runes))
+    Map.put(activity, "state", truncate_units(author, @text_max_units))
   end
 
   defp put_state(activity, _card), do: activity
@@ -103,7 +112,7 @@ defmodule Playmark.Presence.Activity do
        when is_binary(video_id) and video_id != "" do
     assets = %{
       "large_image" => thumbnail(video_id),
-      "large_text" => truncate_bytes(title, @hover_max_bytes)
+      "large_text" => truncate_units(title, @text_max_units)
     }
 
     # `large_url` is present only when `details_url` survived validation, which
@@ -127,28 +136,43 @@ defmodule Playmark.Presence.Activity do
 
   defp thumbnail(video_id), do: String.replace(@thumbnail, "~s", video_id)
 
-  defp truncate_runes(text, max) do
-    case String.length(text) do
-      length when length > max -> String.slice(text, 0, max)
-      _length -> text
-    end
-  end
-
-  # A byte cap, with the cut backed off to a codepoint boundary: half a
-  # codepoint is itself malformed, so Discord would reject the activity.
-  defp truncate_bytes(text, max) do
-    if byte_size(text) <= max do
+  # Cuts `text` to Discord's limit, marking the cut with an ellipsis. The
+  # ellipsis is budgeted for, so a truncated field is never itself over-long.
+  defp truncate_units(text, max) do
+    if units(text) > max do
+      take_units(text, max - units(@ellipsis)) <> @ellipsis
+    else
       text
-    else
-      text |> binary_part(0, max) |> drop_partial_codepoint()
     end
   end
 
-  defp drop_partial_codepoint(binary) do
-    if String.valid?(binary) do
-      binary
-    else
-      drop_partial_codepoint(binary_part(binary, 0, byte_size(binary) - 1))
-    end
+  # What Discord counts: one unit per codepoint, two for anything outside the
+  # Basic Multilingual Plane. Counting runes would undercount every emoji by
+  # half; counting bytes would overcount every non-ASCII character.
+  defp units(text) do
+    text |> String.to_charlist() |> Enum.reduce(0, &(unit_size(&1) + &2))
   end
+
+  # Walks codepoints rather than runes so a cut can never land inside a
+  # surrogate pair — half a codepoint is malformed, and Discord would reject
+  # the activity for that alone.
+  defp take_units(text, budget) do
+    text
+    |> String.to_charlist()
+    |> Enum.reduce_while({[], budget}, fn codepoint, {acc, left} ->
+      size = unit_size(codepoint)
+
+      if size <= left do
+        {:cont, {[codepoint | acc], left - size}}
+      else
+        {:halt, {acc, left}}
+      end
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+    |> List.to_string()
+  end
+
+  defp unit_size(codepoint) when codepoint > 0xFFFF, do: 2
+  defp unit_size(_codepoint), do: 1
 end

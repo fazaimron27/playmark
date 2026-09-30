@@ -73,31 +73,68 @@ defmodule Playmark.Presence.ActivityTest do
     refute Map.has_key?(activity, "buttons")
   end
 
-  test "truncates the title to 48 runes and the channel to 40" do
-    title = String.duplicate("a", 60)
-    author = String.duplicate("b", 60)
+  # Discord counts these fields in UTF-16 code units, not runes and not bytes —
+  # measured against a real client: 128 ASCII runes accepted, 129 rejected; 128
+  # astral-emoji runes rejected (256 units); 128 CJK runes accepted (384 bytes).
+  # A rune cap would therefore let an emoji-heavy title through and have Discord
+  # reject the *whole* activity, losing the card entirely rather than shortening
+  # a line.
+  defp units(text) do
+    text
+    |> String.to_charlist()
+    |> Enum.reduce(0, fn codepoint, acc -> acc + if(codepoint > 0xFFFF, do: 2, else: 1) end)
+  end
+
+  test "sends a title that fits Discord's limit whole" do
+    # The reported case: a real YouTube title, well inside the limit, was being
+    # cut at 48 characters.
+    title = "HP yang biasanya juara rekomendasi - Unboxing Redmi Note 17 Pro 5G!"
+
+    activity = Activity.build(card(%{title: title}))
+
+    assert activity["details"] == title
+  end
+
+  test "truncates an over-long title and channel, marking the cut" do
+    title = String.duplicate("a", 200)
+    author = String.duplicate("b", 200)
 
     activity = Activity.build(card(%{title: title, author: author}))
 
-    assert String.length(activity["details"]) == 48
-    assert String.length(activity["state"]) == 40
+    # The ellipsis sits *inside* the budget rather than on top of it: a cut that
+    # pushed the field back over 128 would be rejected instead of shortened.
+    assert activity["details"] == String.duplicate("a", 127) <> "…"
+    assert activity["state"] == String.duplicate("b", 127) <> "…"
+    assert units(activity["details"]) <= 128
   end
 
-  test "keeps a multi-byte title valid across the rune boundary" do
-    title = String.duplicate("動", 60)
+  test "counts an astral character as the two units Discord counts it as" do
+    title = String.duplicate("🔥", 100)
+
     activity = Activity.build(card(%{title: title}))
 
-    assert String.length(activity["details"]) == 48
-    assert String.valid?(activity["details"])
+    # 63 emoji is the most that fits in 127 units; a 64th would overrun.
+    assert activity["details"] == String.duplicate("🔥", 63) <> "…"
+    assert units(activity["details"]) <= 128
   end
 
-  test "caps the hover text at 128 bytes without cutting a codepoint" do
-    title = String.duplicate("動", 100)
+  test "never cuts a codepoint in half" do
+    activity = Activity.build(card(%{title: String.duplicate("動", 200)}))
+
+    assert String.valid?(activity["details"])
+    assert units(activity["details"]) <= 128
+  end
+
+  test "caps the hover text by the same rule as the title" do
+    title = String.duplicate("漢", 200)
+
     activity = Activity.build(card(%{title: title}))
 
     text = activity["assets"]["large_text"]
 
-    assert byte_size(text) <= 128
+    # This title is 600 bytes, which the old byte cap cut to 42 characters —
+    # the unit Discord counts was never bytes.
+    assert units(text) <= 128
     assert String.valid?(text)
   end
 
