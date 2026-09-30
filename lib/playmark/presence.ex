@@ -55,6 +55,16 @@ defmodule Playmark.Presence do
   delay a keystroke. Discord being unreachable is reported to the caller **once
   per session** as `{:presence_unavailable}` and then left alone.
 
+  Every transition reaches the caller rather than only the failures, as
+  `{:presence_status, status}` — `:active` when the card is live (or was skipped
+  as already live), `:unavailable` on any failure, and `:off` when the process is
+  parked. The TUI draws the now-playing badge from it, and the two messages are
+  deliberately different frequencies: a badge that learned of a failure once per
+  session would sit dark for every play after the first while Discord was down,
+  whereas the footer is only worth telling a user once. `:off` in particular is
+  why the TUI never reads `discord_presence`: the parked clause already holds the
+  subscriber the cast carried.
+
   The flag re-arms on a successful **publish**, not merely on a successful
   connect. That distinction matters when a socket opens but writes keep failing:
   re-arming on connect would report again on every reconnect cycle, and the
@@ -160,7 +170,13 @@ defmodule Playmark.Presence do
   # --- casts -----------------------------------------------------------------
 
   @impl true
-  def handle_cast({:set_playing, _card, _subscriber}, %{enabled: false} = state) do
+  def handle_cast({:set_playing, _card, subscriber}, %{enabled: false} = state) do
+    # The badge is the only thing the TUI hears about a parked process, and it
+    # needs to: with presence off there is no card to report on, and a badge that
+    # simply never arrived would be indistinguishable from one still connecting.
+    # Reporting from here is also what keeps the setting out of the TUI, which
+    # never reads `discord_presence` itself.
+    if is_pid(subscriber), do: send(subscriber, {:presence_status, :off})
     {:noreply, state}
   end
 
@@ -229,7 +245,7 @@ defmodule Playmark.Presence do
         }
 
       {:error, reason} ->
-        state |> schedule_retry() |> report_unavailable(reason)
+        state |> schedule_retry() |> report_failure(reason)
     end
   end
 
@@ -241,6 +257,23 @@ defmodule Playmark.Presence do
   defp report_unavailable(state, _reason) do
     if is_pid(state.subscriber), do: send(state.subscriber, {:presence_unavailable})
     %{state | reported_failure: true}
+  end
+
+  # Every failure, gated or not. The two reports have different audiences and
+  # deliberately different frequencies: `{:presence_status, :unavailable}` keeps
+  # the now-playing badge honest, so it goes out on each transition, while the
+  # footer message above is worth showing a user only once per session.
+  defp report_failure(state, reason) do
+    state |> report_status(:unavailable) |> report_unavailable(reason)
+  end
+
+  defp report_active(state), do: report_status(state, :active)
+
+  defp report_status(%{subscriber: subscriber} = state, status) do
+    # A status with no subscriber has nowhere to go; a status the subscriber has
+    # since stopped listening for is dropped there, by the TUI.
+    if is_pid(subscriber), do: send(subscriber, {:presence_status, status})
+    state
   end
 
   # Bounded exponential backoff, unlike the reference implementation's flat 1s
@@ -261,7 +294,9 @@ defmodule Playmark.Presence do
     key = {identity(state.card), anchored?(state.card)}
 
     if state.conn != nil and key == state.published and fresh?(state) do
-      state
+      # The card is already live and fresh, so nothing goes out — but the badge
+      # still belongs lit, and this is the only path that would leave it dark.
+      report_active(state)
     else
       do_publish(state, key)
     end
@@ -288,13 +323,14 @@ defmodule Playmark.Presence do
         # fresh report.
         |> Map.put(:reported_failure, false)
         |> schedule_refresh()
+        |> report_active
 
       {:error, reason} ->
         # The socket is dead — the only place that is discoverable, since there
         # is no background reader. Close it so the next attempt starts from a
         # clean handshake instead of writing into a half-dead socket.
         client().close(state.conn)
-        state |> schedule_retry() |> Map.put(:conn, nil) |> report_unavailable(reason)
+        state |> schedule_retry() |> Map.put(:conn, nil) |> report_failure(reason)
     end
   end
 

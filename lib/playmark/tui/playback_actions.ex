@@ -351,6 +351,13 @@ defmodule Playmark.TUI.PlaybackActions do
       # Chapter count, filled in from the caption probe's {:chapters, n} report
       # (mpv/VLC with captions on). nil until then / when no probe runs.
       chapters: nil,
+      # Whether this play's card is actually on Discord. Seeded nil, not
+      # `:pending`: `set_playing` is a cast, so nothing here can tell a delivered
+      # card from a dropped one, and a badge drawn from the cast alone would
+      # claim a connection it has never seen. `handle_info/2` fills it in from
+      # the first `{:presence_status, _}` Presence reports — kept inside
+      # `playing`, so it needs no top-level key and nothing clears it.
+      presence: nil,
       origin: origin,
       queue_id: queue_id,
       return_mode: return_mode

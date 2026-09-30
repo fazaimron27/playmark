@@ -89,6 +89,7 @@ defmodule Playmark.PresenceTest do
   defp flush_presence do
     receive do
       {:presence_unavailable} -> flush_presence()
+      {:presence_status, _status} -> flush_presence()
       {:client, _call} -> flush_presence()
     after
       0 -> :ok
@@ -102,6 +103,62 @@ defmodule Playmark.PresenceTest do
 
     refute_receive {:client, _call}, 50
     assert Process.alive?(pid)
+  end
+
+  # The four tests below cover the badge's input, which is separate from the
+  # footer report: `{:presence_status, status}` is sent on *every* transition so
+  # the now-playing strip can follow it, while `{:presence_unavailable}` stays
+  # gated to once per session.
+
+  test "reports :active to the subscriber when the card is published" do
+    pid = start()
+
+    set_playing(pid, @card)
+
+    assert_receive {:presence_status, :active}, 500
+  end
+
+  test "reports :active when a repeated set is skipped" do
+    # The second set inside the refresh window takes the skip in `publish/1` and
+    # never reaches `do_publish` — but the card is live on Discord either way, so
+    # the badge belongs lit. Reporting only from `do_publish` would leave a
+    # replayed video showing no badge at all.
+    pid = start(refresh_ms: 60_000)
+    set_playing(pid, @card)
+    assert_receive {:presence_status, :active}, 500
+
+    flush_presence()
+    set_playing(pid, @card)
+
+    assert_receive {:presence_status, :active}, 500
+  end
+
+  test "reports :unavailable on every failure, not only the first" do
+    # The footer message is gated; this one deliberately is not. A badge that
+    # learned about failure once per session would sit dark for every play after
+    # the first while Discord is down.
+    Application.put_env(:playmark, :presence_test_connect, :fail)
+    pid = start()
+
+    set_playing(pid, @card)
+    assert_receive {:presence_status, :unavailable}, 500
+
+    flush_presence()
+    set_playing(pid, @card)
+
+    assert_receive {:presence_status, :unavailable}, 500
+  end
+
+  test "reports :off to the subscriber when disabled" do
+    # The parked instance already holds the subscriber the cast carried, so the
+    # TUI never has to read `discord_presence` itself — which is what keeps a
+    # default install from showing a badge it cannot justify.
+    pid = start(enabled: false)
+
+    set_playing(pid, @card)
+
+    assert_receive {:presence_status, :off}, 500
+    refute_receive {:client, _call}, 50
   end
 
   test "publishes the card on set" do

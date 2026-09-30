@@ -1536,6 +1536,59 @@ defmodule Playmark.TUITest do
       assert strip_text(TUI.render(user_state(pid), frame())) == []
     end
 
+    # The badge carries its own color, so a strip wearing one is rich text
+    # rather than the bare string strip_text/1 looks for. This flattens either
+    # shape, which also pins the no-badge path as the plain binary it was.
+    defp strip_line_text(widgets) do
+      widgets
+      |> Enum.flat_map(fn {widget, _rect} ->
+        case Map.get(widget, :text) do
+          # Joined, not returned as a list: `flat_map` would flatten the spans
+          # into siblings and `find/2` below would then match the title span on
+          # its own, quietly dropping the badge this helper exists to read.
+          %ExRatatui.Text{lines: lines} ->
+            [lines |> Enum.flat_map(& &1.spans) |> Enum.map_join(& &1.content)]
+
+          text when is_binary(text) ->
+            [text]
+
+          _other ->
+            []
+        end
+      end)
+      |> Enum.find(&String.starts_with?(&1, "▶"))
+    end
+
+    test "the strip badges the card once presence reports it published" do
+      pid = start_tui()
+      state = seed_strip(pid, presence: :active)
+
+      strip = strip_line_text(TUI.render(state, frame()))
+
+      assert strip =~ "Elixir in Action"
+      assert strip =~ "● Discord"
+    end
+
+    test "the badge marks a card that is not being delivered" do
+      pid = start_tui()
+      state = seed_strip(pid, presence: :unavailable)
+
+      # Presence is on but has no socket — a state that must not look like the
+      # off state, or the badge's absence would mean two different things.
+      assert strip_line_text(TUI.render(state, frame())) =~ "○ Discord"
+    end
+
+    test "no badge when presence is off, or before it has reported" do
+      pid = start_tui()
+
+      for presence <- [nil, :off] do
+        strip = strip_line_text(TUI.render(seed_strip(pid, presence: presence), frame()))
+
+        refute strip =~ "Discord"
+        assert strip =~ "Elixir in Action"
+      end
+    end
+
     # `:playing` is preparation-only now, so its footer must not tell the user to
     # close a player to get back — nothing is up yet, and once it is the browse
     # mode returns on its own. It also offers no keys, because none are accepted.
@@ -5616,6 +5669,32 @@ defmodule Playmark.TUITest do
       assert PlaybackActions.stop_player(%{playing: nil}) == %{playing: nil}
 
       refute_received {TestPresence, :clear}
+    end
+
+    test "the badge follows the status the presence process reports" do
+      stub_presence()
+      stub_playback()
+
+      Repo.insert!(%Bookmark{url: "https://youtu.be/dQw4w9WgXcQ", title: "V", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPresence, :set_playing, _card}, 1_000
+
+      # Asked for, not accepted: `set_playing` is a cast to another process, so
+      # nothing here can tell a delivered card from a dropped one. The badge is
+      # the answer, and until Presence reports, there is no answer — a badge
+      # that lit on the cast would be claiming a socket it has never seen.
+      assert user_state(pid).playing.presence == nil
+
+      send(pid, {:presence_status, :active})
+      assert user_state(pid).playing.presence == :active
+
+      send(pid, {:presence_status, :unavailable})
+      assert user_state(pid).playing.presence == :unavailable
+
+      send(play_task, :close)
     end
   end
 
