@@ -358,6 +358,11 @@ defmodule Playmark.TUI.PlaybackActions do
       # the first `{:presence_status, _}` Presence reports — kept inside
       # `playing`, so it needs no top-level key and nothing clears it.
       presence: nil,
+      # Whether the player is paused, which the strip badges so a cleared card
+      # cannot be mistaken for presence being switched off. Reported by both
+      # backends that can be controlled (see Playmark.Player.Control); a player
+      # with no control socket never reports one and stays `false`.
+      paused: false,
       origin: origin,
       queue_id: queue_id,
       return_mode: return_mode
@@ -541,6 +546,19 @@ defmodule Playmark.TUI.PlaybackActions do
     {:noreply, state}
   end
 
+  # A paused video is not being watched, so the card goes away until it resumes.
+  # Both transitions reset the anchor, and that is what makes the resumed bar
+  # restart from where the pause left off rather than from the start of the
+  # video: Control re-reports the position when playback resumes, and only an
+  # unanchored play takes that report (see the `anchor: nil` clause above).
+  def handle_progress(
+        {:play_progress, ref, {:paused, paused?}},
+        %{playing: %{ref: ref} = playing} = state
+      )
+      when is_boolean(paused?) do
+    {:noreply, %{state | playing: paused_presence(playing, paused?)}}
+  end
+
   def handle_progress({:play_progress, ref, stage}, %{playing: %{ref: ref} = playing} = state)
       when is_map(playing) and is_atom(stage) do
     {:noreply, maybe_unlock(%{state | playing: %{playing | stage: stage}})}
@@ -608,6 +626,28 @@ defmodule Playmark.TUI.PlaybackActions do
       {:error, _reason} ->
         Impl.presence().clear()
     end
+  end
+
+  # Presence for a pause and a resume. Clearing rather than sending a "paused"
+  # activity is deliberate: the card's whole content is the video and its
+  # progress, and there is no paused *state* to render — a card with a frozen
+  # bar would be the same card, claiming the same thing.
+  #
+  # A pause keeps `presence` as it was. It is the strip's only evidence that
+  # there *was* a card to pause, and without it a local file — which never
+  # publishes one — would show a paused badge for a card that never existed.
+  #
+  # A resume clears it, because the republish is in flight and nothing has
+  # confirmed it yet; `publish_presence/1` revalidates the URL and re-derives
+  # the id rather than trusting the card it replaces.
+  defp paused_presence(playing, true) do
+    Impl.presence().clear()
+    %{playing | paused: true, anchor: nil}
+  end
+
+  defp paused_presence(playing, false) do
+    publish_presence(playing)
+    %{playing | paused: false, anchor: nil, presence: nil}
   end
 
   @doc """

@@ -1589,6 +1589,33 @@ defmodule Playmark.TUITest do
       end
     end
 
+    # A paused play has no card, so `●` would be claiming a card Discord is not
+    # showing; saying nothing would be indistinguishable from presence being
+    # switched off. The strip says which of the two it is.
+    test "the strip marks the card paused while the video is paused" do
+      pid = start_tui()
+      state = seed_strip(pid, presence: :active, paused: true)
+
+      strip = strip_line_text(TUI.render(state, frame()))
+
+      assert strip =~ "Elixir in Action"
+      assert strip =~ "‖ Discord"
+      refute strip =~ "● Discord"
+    end
+
+    # The badge keys off the card having been up, not off the pause alone: a
+    # local file never publishes (its path is not a URL), so it has nothing to
+    # have paused — and a `‖` there would announce a card that never existed.
+    test "no paused badge for a play that never published a card" do
+      pid = start_tui()
+      state = seed_strip(pid, presence: nil, paused: true)
+
+      strip = strip_line_text(TUI.render(state, frame()))
+
+      assert strip =~ "Elixir in Action"
+      refute strip =~ "Discord"
+    end
+
     # `:playing` is preparation-only now, so its footer must not tell the user to
     # close a player to get back — nothing is up yet, and once it is the browse
     # mode returns on its own. It also offers no keys, because none are accepted.
@@ -5693,6 +5720,62 @@ defmodule Playmark.TUITest do
 
       send(pid, {:presence_status, :unavailable})
       assert user_state(pid).playing.presence == :unavailable
+
+      send(play_task, :close)
+    end
+
+    test "clears the card while paused, and publishes it again on resume" do
+      stub_presence()
+      stub_playback()
+
+      url = "https://youtu.be/dQw4w9WgXcQ"
+      Repo.insert!(%Bookmark{url: url, title: "V", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPresence, :set_playing, _card}, 1_000
+
+      # A paused video is not "now playing": leaving the card up would tell
+      # Discord's users the video is running while the player sits still.
+      send(play_task, {:progress, {:paused, true}})
+      assert_receive {TestPresence, :clear}, 1_000
+      assert user_state(pid).playing.paused == true
+
+      send(play_task, {:progress, {:paused, false}})
+      assert_receive {TestPresence, :set_playing, card}, 1_000
+      assert card.url == url
+      assert user_state(pid).playing.paused == false
+
+      send(play_task, :close)
+    end
+
+    test "resuming re-anchors the bar from where the pause left off" do
+      stub_presence()
+      stub_playback()
+
+      Repo.insert!(%Bookmark{url: "https://youtu.be/dQw4w9WgXcQ", title: "V", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPresence, :set_playing, _card}, 1_000
+
+      send(play_task, {:progress, {:checkpoint, 45_000, 300_000}})
+      assert_receive {TestPresence, :anchor, 45_000, 300_000}, 1_000
+
+      send(play_task, {:progress, {:paused, true}})
+      assert_receive {TestPresence, :clear}, 1_000
+
+      send(play_task, {:progress, {:paused, false}})
+      assert_receive {TestPresence, :set_playing, _card}, 1_000
+
+      # The same pair the play already reported once. It anchors again only
+      # because the pause reset the anchor — which is exactly the "start the
+      # bar from where it left off" this feature is for, since the resumed
+      # card is republished with no anchor of its own.
+      send(play_task, {:progress, {:checkpoint, 45_000, 300_000}})
+      assert_receive {TestPresence, :anchor, 45_000, 300_000}, 1_000
 
       send(play_task, :close)
     end

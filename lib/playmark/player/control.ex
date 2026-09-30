@@ -23,6 +23,33 @@ defmodule Playmark.Player.Control do
   before unlocking browsing, because takeover depends on being able to deliver a
   quit — see `Playmark.TUI.PlaybackActions`.
 
+  ## Pauses
+
+  A third report, `{:paused, true}` / `{:paused, false}`, goes through the same
+  callback. It is sent only when the state *changes*, on either player, because
+  both have a way of telling you the state playback is already in: mpv pushes the
+  property's current value the moment it is subscribed to, and VLC's poll answers
+  the same thing every five seconds. Reporting those would read downstream as a
+  resume — republishing a card and re-anchoring its bar — on every play and then
+  every five seconds.
+
+  Resuming also forces a position report, and sends it *after* the resume. Both
+  halves matter: the card is republished without an anchor, so a position report
+  that arrived first would be discarded; and without the force, mpv would send
+  nothing at all while the position sits still, leaving the bar blank until the
+  next throttled checkpoint ten seconds later.
+
+  The two players get there differently. mpv observes the `pause` property over
+  JSON IPC, so the transition arrives the instant it happens. VLC has no such
+  event — its state is polled, and the `status` reply is read by
+  `parse_vlc_state/1`, which acts only on `playing` and `paused` and ignores
+  everything else rather than guessing. So a VLC pause is noticed up to
+  `@poll_interval_ms` late, and a state this module does not recognise degrades
+  to "no pause detection" rather than to a wrong card.
+
+  ffplay is absent from all of this by construction: it has no control socket, so
+  a paused ffplay is indistinguishable from a playing one.
+
   ## Stopping a running player
 
   Send `:playmark_stop` to the process running `run/4`. It writes a quit command
@@ -40,6 +67,12 @@ defmodule Playmark.Player.Control do
   @minimum_position_ms 10_000
   @completion_window_ms 30_000
   @max_error_output 8_192
+
+  # How often VLC is asked where it is. It is also the latency floor on noticing
+  # a pause: VLC has no event to push, so a pause is only seen on the next poll,
+  # and the card lingers for up to this long before it is cleared.
+  @poll_interval_ms 5_000
+  @query_timeout_ms 1_000
 
   @type kind :: :mpv | :vlc
 
@@ -83,6 +116,10 @@ defmodule Playmark.Player.Control do
         when is_boolean(value) ->
           {:seekable, value}
 
+        %{"event" => "property-change", "name" => "pause", "data" => value}
+        when is_boolean(value) ->
+          {:pause, value}
+
         %{"event" => "end-file", "reason" => reason} when is_binary(reason) ->
           {:end_file, reason}
 
@@ -103,6 +140,26 @@ defmodule Playmark.Player.Control do
     |> Integer.parse()
     |> case do
       {value, ""} when value >= 0 -> {:ok, value}
+      _other -> :ignore
+    end
+  end
+
+  # VLC has no pause *event*: unlike mpv, whose JSON IPC pushes a property change
+  # the moment the property moves, VLC's RC interface only answers when asked, so
+  # the state has to be polled for. `status` is the only thing that answers it,
+  # and it replies with several lines — the state is the last, but this keys on
+  # content rather than position so a shifted reply cannot make it miss.
+  #
+  # Only the two states a pause feature acts on are read: `playback_actions`
+  # clears the card on `{:paused, true}` and republishes on `{:paused, false}`, so
+  # guessing at an unrecognised state would clear the card of a video still
+  # playing. `stopped`, the startup chatter, and a bare prompt are all ignored,
+  # which degrades this to "no pause detection" rather than to a wrong card.
+  @doc false
+  def parse_vlc_state(line) when is_binary(line) do
+    case Regex.run(~r/\(\s*state\s+([a-z]+)\s*\)/, line) do
+      [_, "playing"] -> {:ok, :playing}
+      [_, "paused"] -> {:ok, :paused}
       _other -> :ignore
     end
   end
@@ -152,6 +209,7 @@ defmodule Playmark.Player.Control do
       position_ms: nil,
       duration_ms: nil,
       seekable: kind == :vlc,
+      paused: false,
       end_reason: nil,
       pending: nil,
       poll_ref: nil,
@@ -222,7 +280,7 @@ defmodule Playmark.Player.Control do
 
   defp initialize_control(%{kind: :mpv, socket: socket} = state) do
     Enum.each(
-      [{1, "time-pos"}, {2, "duration"}, {3, "seekable"}],
+      [{1, "time-pos"}, {2, "duration"}, {3, "seekable"}, {4, "pause"}],
       fn {id, property} ->
         command = Jason.encode!(%{command: ["observe_property", id, property]}) <> "\n"
         :ok = :gen_tcp.send(socket, command)
@@ -272,7 +330,7 @@ defmodule Playmark.Player.Control do
       {:control_query_timeout, ref} when ref == state.poll_ref ->
         state
         |> Map.put(:pending, nil)
-        |> schedule_poll(1_000)
+        |> schedule_poll(@query_timeout_ms)
         |> monitor()
 
       _other ->
@@ -281,16 +339,48 @@ defmodule Playmark.Player.Control do
   end
 
   defp handle_control_line(%{kind: :mpv} = state, line) do
-    state =
-      case parse_mpv_line(line) do
-        {:position, position_ms} -> Map.put(state, :position_ms, position_ms)
-        {:duration, duration_ms} -> Map.put(state, :duration_ms, duration_ms)
-        {:seekable, seekable} -> Map.put(state, :seekable, seekable)
-        {:end_file, reason} -> Map.put(state, :end_reason, reason)
-        :ignore -> state
-      end
+    case parse_mpv_line(line) do
+      {:position, position_ms} ->
+        state |> Map.put(:position_ms, position_ms) |> maybe_checkpoint(false)
 
-    maybe_checkpoint(state, false)
+      {:duration, duration_ms} ->
+        state |> Map.put(:duration_ms, duration_ms) |> maybe_checkpoint(false)
+
+      {:seekable, seekable} ->
+        state |> Map.put(:seekable, seekable) |> maybe_checkpoint(false)
+
+      {:end_file, reason} ->
+        state |> Map.put(:end_reason, reason) |> maybe_checkpoint(false)
+
+      {:pause, paused} ->
+        handle_pause(state, paused)
+
+      :ignore ->
+        maybe_checkpoint(state, false)
+    end
+  end
+
+  # The state is the *last* of the lines a status reply carries, so the earlier
+  # ones are read past rather than ending the cycle — anything that stops short
+  # of a recognised state leaves `pending` alone and lets the next line through.
+  # If the reply never gets there, the query timeout resets the cycle as it does
+  # for a missing `get_time` answer.
+  #
+  # This clause sits above the position one deliberately: that clause matches any
+  # pending step, so below it this state reply would be swallowed by its `_other`
+  # arm and never parsed.
+  defp handle_control_line(%{kind: :vlc, pending: :state} = state, line) do
+    case parse_vlc_state(line) do
+      {:ok, state_name} ->
+        state
+        |> report_vlc_state(state_name)
+        |> maybe_checkpoint(resumed?(state, state_name))
+        |> Map.put(:pending, nil)
+        |> schedule_poll(@poll_interval_ms)
+
+      :ignore ->
+        state
+    end
   end
 
   defp handle_control_line(%{kind: :vlc, pending: pending} = state, line) do
@@ -300,14 +390,63 @@ defmodule Playmark.Player.Control do
         %{state | position_ms: seconds * 1_000, pending: :length}
 
       {:length, {:ok, seconds}} ->
+        # The state query rides along with the position one that is happening
+        # anyway, so a pause costs a command rather than a second timer.
+        :ok = :gen_tcp.send(state.socket, "status\n")
+
         state
         |> Map.put(:duration_ms, seconds * 1_000)
-        |> Map.put(:pending, nil)
-        |> maybe_checkpoint(false)
-        |> schedule_poll(5_000)
+        |> Map.put(:pending, :state)
 
       _other ->
         state
+    end
+  end
+
+  # Resuming forces a position report for the same reason mpv's does, and it is
+  # written *after* the resume is reported for the same reason too: republishing
+  # resets the anchor, so a position report that arrived first would be thrown
+  # away and the bar would sit blank until the next poll.
+  defp resumed?(%{paused: true}, :playing), do: true
+  defp resumed?(_state, _state_name), do: false
+
+  # A pause or a resume is reported only when it *changes* what we believed.
+  # mpv emits the property's current value the moment it is subscribed to, so
+  # reporting every observation would announce a resume on every play — the card
+  # would be republished and the bar re-anchored before playback even started.
+  #
+  # Resuming also forces the position report the card re-anchors to, because mpv
+  # sends nothing of its own while the position is not moving. A pause does not
+  # force one: it is about to clear the card, so a fresher checkpoint would be
+  # written for nobody.
+  #
+  # The stage is reported *before* that forced checkpoint, and the order is
+  # load-bearing: republishing resets the anchor, so a position report that
+  # arrived first would be discarded and the bar would stay blank until the next
+  # throttled checkpoint — up to ten seconds of a card with no progress on it.
+  defp handle_pause(%{paused: paused} = state, paused), do: maybe_checkpoint(state, false)
+
+  defp handle_pause(state, paused) do
+    Playmark.Player.Playback.report(state.opts, {:paused, paused})
+
+    state
+    |> Map.put(:paused, paused)
+    |> maybe_checkpoint(not paused)
+  end
+
+  # Only a change is reported, for the same reason mpv's initial observation is
+  # ignored: `playback_actions` reads a resume as "republish and re-anchor". A
+  # poll that keeps answering `playing` is the state playback is already in, not
+  # a resume — and since the poll repeats every few seconds, reporting every
+  # answer would re-anchor the bar on each one.
+  defp report_vlc_state(%{paused: paused} = state, state_name) do
+    paused? = state_name == :paused
+
+    if paused == paused? do
+      state
+    else
+      Playmark.Player.Playback.report(state.opts, {:paused, paused?})
+      %{state | paused: paused?}
     end
   end
 
@@ -315,7 +454,7 @@ defmodule Playmark.Player.Control do
     case :gen_tcp.send(socket, "get_time\n") do
       :ok ->
         ref = make_ref()
-        Process.send_after(self(), {:control_query_timeout, ref}, 1_000)
+        Process.send_after(self(), {:control_query_timeout, ref}, @query_timeout_ms)
         %{state | pending: :time, poll_ref: ref}
 
       {:error, _reason} ->

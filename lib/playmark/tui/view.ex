@@ -76,7 +76,7 @@ defmodule Playmark.TUI.View do
   # because it carries a color of its own, which a single-style Paragraph cannot
   # give it.
   defp strip_text(playing) do
-    case presence_badge(Map.get(playing, :presence)) do
+    case badge_for(playing) do
       nil ->
         strip_line(playing)
 
@@ -89,6 +89,19 @@ defmodule Playmark.TUI.View do
         ])
     end
   end
+
+  # A paused play has no card: the play path clears it on pause and republishes
+  # on resume. Saying so beats drawing nothing, which is indistinguishable from
+  # presence being switched off — and it beats leaving `●` up, which would claim
+  # a card Discord is not showing.
+  #
+  # Gated on `:active` rather than on the pause alone, because a play that never
+  # published — a local file, or anything that failed URL validation — would
+  # otherwise announce a paused card it never had. `:active` is the report that
+  # a card was up; a paused play that still reads `:unavailable` keeps saying so.
+  defp badge_for(%{paused: true, presence: :active}), do: {"‖ Discord", :dark_gray}
+
+  defp badge_for(playing), do: presence_badge(Map.get(playing, :presence))
 
   # What the card is doing *now*, which the TUI cannot otherwise see: the play
   # path casts the card and moves on. Greek for the same reason `●` is used by
