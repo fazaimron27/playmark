@@ -196,6 +196,34 @@ defmodule Playmark.TUITest.TestExplore do
   end
 end
 
+defmodule Playmark.TUITest.TestPresence do
+  @moduledoc """
+  A stub for the TUI's presence seam. Every call is forwarded to the test
+  process, so a test asserts *when* presence is told about a play rather than
+  how the card is built — `Playmark.ActivityTest` and `Playmark.PresenceTest`
+  own the card's contents and the process's behaviour.
+  """
+
+  def set_playing(card) do
+    send(Application.get_env(:playmark, :test_presence_pid), {__MODULE__, :set_playing, card})
+    :ok
+  end
+
+  def anchor(position_ms, duration_ms) do
+    send(
+      Application.get_env(:playmark, :test_presence_pid),
+      {__MODULE__, :anchor, position_ms, duration_ms}
+    )
+
+    :ok
+  end
+
+  def clear do
+    send(Application.get_env(:playmark, :test_presence_pid), {__MODULE__, :clear})
+    :ok
+  end
+end
+
 defmodule Playmark.TUITest do
   # test_mode disables live terminal polling; still touches the DB, so not async.
   use Playmark.DataCase, async: false
@@ -205,12 +233,14 @@ defmodule Playmark.TUITest do
   alias Playmark.TUITest.TestLocalFiles
   alias Playmark.TUITest.TestPlayback
   alias Playmark.TUITest.TestPlaylists
+  alias Playmark.TUITest.TestPresence
   alias Playmark.TUITest.TestSearch
   alias Playmark.TUITest.TestYouTubePlaylist
 
   alias ExRatatui.Event
   alias ExRatatui.Runtime
   alias Playmark.Bookmarks.Bookmark
+  alias Playmark.TUI.PlaybackActions
   alias Playmark.{History, Queue, TUI}
 
   defp start_tui do
@@ -237,6 +267,16 @@ defmodule Playmark.TUITest do
       Application.delete_env(:playmark, :playback_impl)
       Application.delete_env(:playmark, :test_playback_pid)
       Application.delete_env(:playmark, :test_resume_supported)
+    end)
+  end
+
+  defp stub_presence do
+    Application.put_env(:playmark, :presence_impl, TestPresence)
+    Application.put_env(:playmark, :test_presence_pid, self())
+
+    on_exit(fn ->
+      Application.delete_env(:playmark, :presence_impl)
+      Application.delete_env(:playmark, :test_presence_pid)
     end)
   end
 
@@ -857,6 +897,11 @@ defmodule Playmark.TUITest do
         playing = %{
           ref: ref,
           title: "V",
+          # Presence reads url/author/title off this map when the :playing stage
+          # arrives, so a fixture missing them is not a smaller playing map — it
+          # is one that cannot be reported on. Kept in step with launch_play/6.
+          url: "https://youtu.be/dQw4w9WgXcQ",
+          author: nil,
           player: :test,
           steps: [:playing],
           stage: :starting,
@@ -1315,10 +1360,12 @@ defmodule Playmark.TUITest do
               task_pid: test_pid,
               title: "Preparing",
               url: "https://youtu.be/prep",
+              author: nil,
               player: :vlc,
               steps: [:resolving, :captions, :playing],
               stage: :resolving,
               control: :pending,
+              anchor: nil,
               stream: nil,
               captions: nil,
               chapters: nil,
@@ -5439,6 +5486,136 @@ defmodule Playmark.TUITest do
       _ = :sys.get_state(pid)
 
       assert user_state(pid).filter == ""
+    end
+  end
+
+  describe "Discord presence" do
+    test "announces the video once the player reports it is playing" do
+      stub_presence()
+      stub_playback()
+
+      url = "https://youtu.be/dQw4w9WgXcQ"
+      Repo.insert!(%Bookmark{url: url, title: "V", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
+
+      # The card is published on the :playing stage, not at launch, so a play
+      # that never starts is never announced. Reaching the stub's own
+      # announcement proves that stage has already been reported.
+      assert_receive {TestPresence, :set_playing, card}, 1_000
+      assert card.title == "V"
+      assert card.author == "C"
+      assert card.url == url
+      assert card.video_id == "dQw4w9WgXcQ"
+
+      send(play_task, :close)
+    end
+
+    test "announces nothing while a play is still being prepared" do
+      stub_presence()
+
+      pid = start_tui()
+      seed_preparing(pid, %{url: "https://youtu.be/dQw4w9WgXcQ", anchor: nil})
+
+      # Resolution and caption download are the long part of a play; no card
+      # may appear until the backend reports the player is actually up.
+      refute_receive {TestPresence, :set_playing, _card}, 50
+      refute_receive {TestPresence, :clear}, 50
+    end
+
+    test "anchors on the first position report and ignores later ones" do
+      stub_presence()
+      stub_playback()
+
+      Repo.insert!(%Bookmark{url: "https://youtu.be/dQw4w9WgXcQ", title: "V", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPresence, :set_playing, _card}, 1_000
+
+      # Driven through the real launch_play/6 closure, which synthesizes this
+      # stage from the player's own {:checkpoint, …} callback — the whole point
+      # of not touching Playmark.Player.Control.
+      send(play_task, {:progress, {:checkpoint, 45_000, 300_000}})
+      assert_receive {TestPresence, :anchor, 45_000, 300_000}, 1_000
+
+      # A later checkpoint of the same play must not re-anchor, or the bar
+      # would jump backwards every ten seconds.
+      send(play_task, {:progress, {:checkpoint, 55_000, 300_000}})
+      refute_receive {TestPresence, :anchor, 55_000, _duration}, 100
+
+      send(play_task, :close)
+    end
+
+    test "clears the card when a play finishes" do
+      stub_presence()
+      stub_playback()
+
+      Repo.insert!(%Bookmark{url: "https://youtu.be/dQw4w9WgXcQ", title: "V", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPresence, :set_playing, _card}, 1_000
+
+      # Releasing the stub makes it return {:ok, :completed}, which reaches the
+      # runtime as the ordinary :play_result.
+      send(play_task, :close)
+
+      assert_receive {TestPresence, :clear}, 1_000
+    end
+
+    test "a stale result from a superseded play does not clear the live card" do
+      stub_presence()
+      stub_playback()
+
+      Repo.insert!(%Bookmark{url: "https://youtu.be/dQw4w9WgXcQ", title: "V", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPresence, :set_playing, _card}, 1_000
+
+      # A play that was replaced or cancelled reports under its own ref, after
+      # the new one has already published. Clearing here would wipe the card
+      # belonging to the player still on screen.
+      send(pid, {:play_result, make_ref(), {:ok, :completed}})
+      _ = :sys.get_state(pid)
+
+      refute_received {TestPresence, :clear}
+      assert user_state(pid).playing != nil
+
+      send(play_task, :close)
+    end
+
+    test "clears rather than announcing when the play is not a YouTube video" do
+      stub_presence()
+
+      pid = start_tui()
+      seed_preparing(pid, %{url: "/home/user/video.mkv", anchor: nil})
+
+      send(pid, {:play_progress, user_state(pid).playing.ref, :playing})
+
+      state = user_state(pid)
+
+      # The card is YouTube-only, so a local file clears instead of sending its
+      # filename and path to Discord.
+      assert_received {TestPresence, :clear}
+      refute_received {TestPresence, :set_playing, _card}
+      assert state.playing.stage == :playing
+    end
+
+    test "quitting with no player running sends no clear" do
+      stub_presence()
+
+      # Actions.handle_event/2 intercepts q and calls stop_player/1, whose
+      # second clause has no player to stop — so it must not emit a cast either.
+      assert PlaybackActions.stop_player(%{playing: nil}) == %{playing: nil}
+
+      refute_received {TestPresence, :clear}
     end
   end
 

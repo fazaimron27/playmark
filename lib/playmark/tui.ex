@@ -730,6 +730,15 @@ defmodule Playmark.TUI do
 
   def handle_info({:clear_status, _status}, state), do: {:noreply, state}
 
+  # Presence reports at most one failure per session (see Playmark.Presence), so
+  # a Discord that is missing or has gone away says so once rather than on every
+  # reconnect cycle. The status self-clears on the ordinary @status_clear_ms
+  # timer, like every other transient status — and it is deliberately a status
+  # rather than a modal: playback is unaffected either way.
+  def handle_info({:presence_unavailable}, state) do
+    {:noreply, %{state | status: {:error, "Discord presence unavailable"}}}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   # --- subscriptions -------------------------------------------------------
