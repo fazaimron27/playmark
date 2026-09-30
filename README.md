@@ -5,6 +5,8 @@ YouTube videos, subscribe to channels, save playlists, search or explore YouTube
 and browse local directories, then play any of it in your media player. Metadata is
 fetched without any API key (via the public oEmbed endpoint), streams are
 resolved with `yt-dlp`, and playback hands off to `mpv`, `vlc`, or `ffplay`.
+An optional [Discord Rich Presence](#discord-rich-presence-optional) card can
+mirror what you're watching on your Discord profile.
 
 ## Requirements
 
@@ -50,6 +52,8 @@ channel_limit = 30        # rows fetched from a channel tab
 oembed_timeout_ms = 4000  # per-title metadata lookup timeout
 oembed_concurrency = 10   # parallel metadata lookups
 socket_timeout = 30       # yt-dlp per-socket timeout, seconds
+discord_presence = false  # show what you're watching on Discord (default false)
+discord_client_id = …     # Discord application id (playmark ships its own)
 ```
 
 Settings are read at startup, so restart playmark after editing the file. An
@@ -418,6 +422,48 @@ chapter seeking. mpv navigates chapters natively (it drives yt-dlp and receives
 the YouTube URL directly); VLC and ffplay play a pre-resolved stream that carries
 no chapter markers. A video without chapters, or playback without a caption probe
 (ffplay, or captions off), shows no chapter line.
+
+### Discord Rich Presence (optional)
+
+Off by default. Set `discord_presence = true` in `config.env`, restart playmark,
+and the video you're watching appears on your Discord profile:
+
+- the title, the channel, and the video's thumbnail
+- a link out from each of them — the title and the thumbnail open the video, and
+  the channel line opens a YouTube search for that channel, because playmark
+  holds a channel *name* on most of the lists you play from (bookmarks, queue,
+  history) but not a channel URL
+- a **Watch on YouTube** button, also linking to the video
+- a progress bar, driven by the player's own position reports
+
+The bar needs those reports, so it appears on `mpv` and `vlc`. `ffplay` has no
+control interface, so its card carries no position and shows elapsed time only.
+
+playmark ships its own Discord application id, so there is nothing to register —
+no API key, no OAuth, no account to create, and no new dependency. It talks to
+the Discord **desktop** app over its local IPC socket, which is why this is
+Linux-only: the socket API playmark uses cannot address a Windows named pipe.
+Discord does not have to be running for playmark to work — if it isn't there, the
+card never appears and playback is completely unaffected. playmark says so once
+per session in the footer rather than on every video. Set `discord_client_id` if
+you'd rather the card belong to your own Discord application.
+
+The now-playing strip shows what the card is doing: `● Discord` while it's live,
+`○ Discord` when Discord can't be reached, and `‖ Discord` while paused. Pausing
+clears the card and resuming republishes it from where it left off; mpv notices a
+pause immediately, VLC up to about five seconds later, and ffplay can't report a
+pause at all. Local files never publish — the card is for YouTube videos.
+
+Presence is best-effort and never blocks a play: the card is published once the
+player is actually up, not while the stream is still being resolved, and cleared
+when playback ends, is stopped with `X`, or you quit.
+
+To see the conversation playmark has with Discord — which socket it finds, the
+handshake, and a sample card — run the trace outside the TUI:
+
+```sh
+mix playmark.debug --presence
+```
 
 ## Development
 
