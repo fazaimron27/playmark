@@ -54,7 +54,9 @@ defmodule Playmark.ConfigTest do
         :channel_limit,
         :oembed_timeout_ms,
         :oembed_concurrency,
-        :socket_timeout
+        :socket_timeout,
+        :discord_presence,
+        :discord_client_id
       ]
 
       original = Enum.map(keys, fn key -> {key, Application.fetch_env(:playmark, key)} end)
@@ -185,6 +187,28 @@ defmodule Playmark.ConfigTest do
       in_tmp_config("player = ffplay\n", fn ->
         assert Config.load() == :ok
         assert Application.get_env(:playmark, :player) == :ffplay
+      end)
+    end
+  end
+
+  describe "discord settings" do
+    test "loads discord_presence and discord_client_id" do
+      in_tmp_config("discord_presence = true\ndiscord_client_id = 999\n", fn ->
+        assert Config.load() == :ok
+        assert Application.get_env(:playmark, :discord_presence) == true
+        assert Application.get_env(:playmark, :discord_client_id) == "999"
+      end)
+    end
+
+    test "drops an invalid discord_presence value and keeps the default" do
+      # Explicitly clear it: the default is read at the use site, so "kept the
+      # default" means the app env is still unset. Without this the assertion
+      # would depend on which order this describe's tests ran in.
+      Application.delete_env(:playmark, :discord_presence)
+
+      in_tmp_config("discord_presence = maybe\n", fn ->
+        assert Config.load() == :ok
+        assert Application.get_env(:playmark, :discord_presence) == nil
       end)
     end
   end

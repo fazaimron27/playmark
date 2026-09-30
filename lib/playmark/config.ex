@@ -34,6 +34,8 @@ defmodule Playmark.Config do
       oembed_timeout_ms = 4000  # per-title oEmbed lookup timeout
       oembed_concurrency = 10   # parallel oEmbed lookups
       socket_timeout = 30       # yt-dlp per-socket timeout, seconds
+      discord_presence = false  # publish a Discord Rich Presence card (default false)
+      discord_client_id = …     # Discord application id (a default is shipped)
 
   Whitespace around keys and values is trimmed. Unknown keys are ignored (with a
   warning) so a typo can't crash boot. An unparseable value for a known key is
@@ -61,7 +63,9 @@ defmodule Playmark.Config do
     "channel_limit" => {:channel_limit, :pos_integer},
     "oembed_timeout_ms" => {:oembed_timeout_ms, :pos_integer},
     "oembed_concurrency" => {:oembed_concurrency, :pos_integer},
-    "socket_timeout" => {:socket_timeout, :pos_integer}
+    "socket_timeout" => {:socket_timeout, :pos_integer},
+    "discord_presence" => {:discord_presence, :boolean},
+    "discord_client_id" => {:discord_client_id, :string}
   }
 
   @doc """

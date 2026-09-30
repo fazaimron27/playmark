@@ -730,6 +730,29 @@ defmodule Playmark.TUI do
 
   def handle_info({:clear_status, _status}, state), do: {:noreply, state}
 
+  # Presence reports at most one failure per session (see Playmark.Presence), so
+  # a Discord that is missing or has gone away says so once rather than on every
+  # reconnect cycle. The status self-clears on the ordinary @status_clear_ms
+  # timer, like every other transient status — and it is deliberately a status
+  # rather than a modal: playback is unaffected either way.
+  def handle_info({:presence_unavailable}, state) do
+    {:noreply, %{state | status: {:error, "Discord presence unavailable"}}}
+  end
+
+  # The badge's input, reported on every presence transition rather than only on
+  # failure — see the sibling clause above, which is gated where this is not.
+  # Folded into `playing` rather than a top-level key: it describes one play, and
+  # it dies with that play rather than needing to be cleared.
+  def handle_info({:presence_status, status}, %{playing: playing} = state)
+      when is_map(playing) do
+    {:noreply, %{state | playing: Map.put(playing, :presence, status)}}
+  end
+
+  # A status with no play running belongs to a play that has already ended: the
+  # process reports on its own schedule, not on the TUI's, so this is ordinary
+  # rather than exceptional. There is nothing to badge and nothing to store.
+  def handle_info({:presence_status, _status}, state), do: {:noreply, state}
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   # --- subscriptions -------------------------------------------------------

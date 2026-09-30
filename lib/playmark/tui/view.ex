@@ -12,6 +12,8 @@ defmodule Playmark.TUI.View do
   alias ExRatatui.Layout
   alias ExRatatui.Layout.Rect
   alias ExRatatui.Style
+  alias ExRatatui.Text
+  alias ExRatatui.Text.{Line, Span}
   alias ExRatatui.Widgets.{Block, Paragraph, Table, TextInput}
 
   alias Playmark.TUI.Filter
@@ -66,8 +68,49 @@ defmodule Playmark.TUI.View do
   defp now_playing_row(_state), do: []
 
   defp now_playing_strip(playing) do
-    %Paragraph{text: strip_line(playing), style: %Style{fg: :cyan}}
+    %Paragraph{text: strip_text(playing), style: %Style{fg: :cyan}}
   end
+
+  # The line stays a plain binary unless a Discord badge joins it, so the common
+  # path renders exactly as it did before the badge existed. The badge is a span
+  # because it carries a color of its own, which a single-style Paragraph cannot
+  # give it.
+  defp strip_text(playing) do
+    case badge_for(playing) do
+      nil ->
+        strip_line(playing)
+
+      {text, fg} ->
+        Text.new([
+          Line.new([
+            Span.new(strip_line(playing)),
+            Span.new("  " <> text, style: %Style{fg: fg})
+          ])
+        ])
+    end
+  end
+
+  # A paused play has no card: the play path clears it on pause and republishes
+  # on resume. Saying so beats drawing nothing, which is indistinguishable from
+  # presence being switched off — and it beats leaving `●` up, which would claim
+  # a card Discord is not showing.
+  #
+  # Gated on `:active` rather than on the pause alone, because a play that never
+  # published — a local file, or anything that failed URL validation — would
+  # otherwise announce a paused card it never had. `:active` is the report that
+  # a card was up; a paused play that still reads `:unavailable` keeps saying so.
+  defp badge_for(%{paused: true, presence: :active}), do: {"‖ Discord", :dark_gray}
+
+  defp badge_for(playing), do: presence_badge(Map.get(playing, :presence))
+
+  # What the card is doing *now*, which the TUI cannot otherwise see: the play
+  # path casts the card and moves on. Greek for the same reason `●` is used by
+  # every status bar — it is one cell wide and unambiguous next to the title.
+  defp presence_badge(:active), do: {"● Discord", :green}
+  defp presence_badge(:unavailable), do: {"○ Discord", :yellow}
+  # `:off` is presence switched off in config, and nil is "no report yet"; both
+  # mean the same thing on screen — there is no card — so neither is drawn.
+  defp presence_badge(_status), do: nil
 
   defp strip_line(playing) do
     title = Map.get(playing, :title) || "Unknown"

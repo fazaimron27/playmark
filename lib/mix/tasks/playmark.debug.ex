@@ -16,6 +16,11 @@ defmodule Mix.Tasks.Playmark.Debug do
       mix playmark.debug --mem
       mix playmark.debug --mem https://www.youtube.com/@SomeChannel
 
+      # Presence mode: trace Discord's local IPC socket — every candidate path
+      # that exists, whether it is trusted, the handshake, a sample card, and the
+      # clear. The TUI reports one fixed sentence on failure; this prints why.
+      mix playmark.debug --presence
+
   Probe mode tries several yt-dlp "player client" strategies. For each, it
   resolves the stream URL(s) and probes each exactly as VLC would — a ranged GET
   with VLC's User-Agent — reporting the real HTTP status. YouTube binds some
@@ -46,12 +51,21 @@ defmodule Mix.Tasks.Playmark.Debug do
 
   `Playmark.Player.Playback` uses the `web_safari` client; this task is what identified
   it, and stays around for re-diagnosing new failures.
+
+  Presence mode is the same idea at the other external boundary. It prints the
+  candidate Discord sockets in try order — the only place a socket path is ever
+  named, since `Playmark.Presence.Client` refuses to put one in a user-facing
+  error — whether each is trusted, and the whole wire conversation: handshake, a
+  sample `SET_ACTIVITY`, and the clear. That is where a wrong
+  `discord_client_id` becomes visible, because Discord answers a bad one with a
+  CLOSE frame that the TUI deliberately reduces to one fixed sentence.
   """
   @shortdoc "Diagnose playback for one URL"
 
   use Mix.Task
 
   alias Playmark.Player.Playback
+  alias Playmark.Presence.{Activity, Client, Socket}
 
   # yt-dlp resolves URLs through a chosen YouTube "player client". Each ships
   # differently-signed URLs; some reject non-matching HTTP clients like VLC.
@@ -93,12 +107,23 @@ defmodule Mix.Tasks.Playmark.Debug do
         Application.ensure_all_started(:playmark)
         subs_mode(url)
 
+      # Presence mode: trace the Discord IPC conversation — every candidate
+      # socket, whether it is trusted, the handshake, a sample card, and the
+      # clear. Started like every other mode so Playmark.Config.load/0 has run:
+      # without it this would report the built-in client id rather than the one
+      # the user's config.env sets, which is the thing it most needs to show.
+      ["--presence" | _rest] ->
+        Application.ensure_all_started(:playmark)
+        presence_mode()
+
       [url | _] when url not in ["--play", "--subs"] ->
         Application.ensure_all_started(:playmark)
         diagnose(url)
 
       _ ->
-        Mix.shell().error("Usage: mix playmark.debug [--play | --subs | --mem] [<youtube-url>]")
+        Mix.shell().error(
+          "Usage: mix playmark.debug [--play | --subs | --mem | --presence] [<youtube-url>]"
+        )
     end
   end
 
@@ -561,6 +586,99 @@ defmodule Mix.Tasks.Playmark.Debug do
   defp redact("http" <> _), do: "<video-url>"
   defp redact("--input-slave=" <> _), do: "--input-slave=<audio-url>"
   defp redact(arg), do: arg
+
+  # --- presence mode: trace the Discord IPC conversation ---------------------
+
+  # The TUI's own failure status is deliberately one fixed sentence, so a
+  # misconfigured `discord_client_id` is invisible there. This is where the
+  # reason — including Discord's own CLOSE message — can be read. It also prints
+  # the candidate list in try order, which is the only place a path is named:
+  # Playmark.Presence.Client deliberately never puts one in a user-facing error,
+  # because a refused candidate is often a socket planted by another user in a
+  # world-writable directory and naming it would be advice to an attacker.
+  defp presence_mode do
+    shell = Mix.shell()
+
+    client_id = Application.get_env(:playmark, :discord_client_id, "1554861700455334040")
+
+    shell.info("== Discord presence ==")
+
+    shell.info(
+      "  enabled:   #{inspect(Application.get_env(:playmark, :discord_presence, false))}"
+    )
+
+    shell.info("  client id: #{client_id}")
+    shell.info("  our uid:   #{Socket.current_uid()}\n")
+
+    shell.info("candidate sockets (in try order):")
+    report_candidates(Socket.candidates(), shell)
+
+    shell.info("\nhandshake:")
+    report_handshake(client_id, shell)
+  end
+
+  # Only existing paths are listed: the candidate list is ~200 entries of which
+  # at most one exists, and a missing socket is not a finding — the client skips
+  # it silently, and printing each one would bury the interesting line.
+  defp report_candidates(candidates, shell) do
+    candidates
+    |> Enum.filter(&File.exists?/1)
+    |> case do
+      [] ->
+        shell.info("  none exist")
+
+      existing ->
+        Enum.each(existing, fn path ->
+          verdict = if Socket.trusted?(path), do: "trusted", else: "REFUSED (not our uid)"
+          shell.info("  #{path} — #{verdict}")
+        end)
+    end
+  end
+
+  defp report_handshake(client_id, shell) do
+    case Client.connect(client_id) do
+      {:ok, conn} ->
+        shell.info("  READY — connected")
+
+        case Client.set_activity(conn, Activity.build(sample_card())) do
+          {:ok, conn} ->
+            shell.info("  SET_ACTIVITY accepted — check your Discord profile now")
+            shell.info("  holding for 8s…")
+            Process.sleep(8_000)
+
+            case Client.clear(conn) do
+              {:ok, conn} ->
+                shell.info("  cleared")
+                Client.close(conn)
+
+              {:error, reason} ->
+                shell.info("  clear failed: #{reason}")
+                Client.close(conn)
+            end
+
+          {:error, reason} ->
+            shell.info("  SET_ACTIVITY rejected: #{reason}")
+            Client.close(conn)
+        end
+
+      {:error, reason} ->
+        shell.info("  FAILED: #{reason}")
+        shell.info("\n  Is Discord running? A refused socket is reported above; a missing")
+        shell.info("  one is not. `Invalid Client ID` means discord_client_id is not a")
+        shell.info("  registered Discord application.")
+    end
+  end
+
+  defp sample_card do
+    %{
+      title: "playmark presence diagnostic",
+      author: "mix playmark.debug",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      video_id: "dQw4w9WgXcQ",
+      start_ms: System.system_time(:millisecond),
+      duration_ms: nil
+    }
+  end
 
   defp diagnose(url) do
     shell = Mix.shell()

@@ -48,6 +48,7 @@ defmodule Playmark.TUI.PlaybackActions do
   alias Playmark.Player.Playback
   alias Playmark.Queue
   alias Playmark.TUI.Impl
+  alias Playmark.YouTube
 
   # A checkpoint is only worth offering when there's a meaningful amount both
   # behind and ahead of it: at least @minimum_resume_ms watched, and more than
@@ -112,6 +113,7 @@ defmodule Playmark.TUI.PlaybackActions do
   pretending — same rule as `takeover/2`.
   """
   def stop_playing(%{playing: %{control: :ready}} = state) do
+    Impl.presence().clear()
     stop_current(state)
     %{state | status: {:info, "Stopping playback…"}}
   end
@@ -138,6 +140,10 @@ defmodule Playmark.TUI.PlaybackActions do
   about to disappear anyway.
   """
   def stop_player(%{playing: %{ref: ref}} = state) do
+    # Sent before the wait, not after: the VM halts as soon as this returns, and
+    # a cast queued behind the halt would never be handled. If it is lost anyway,
+    # the socket closes with the process and Discord clears the card itself.
+    Impl.presence().clear()
     stop_current(state)
     await_stop(ref)
     %{state | playing: nil}
@@ -293,6 +299,11 @@ defmodule Playmark.TUI.PlaybackActions do
     progress = fn
       {:checkpoint, position_ms, duration_ms} ->
         safe_history(fn -> Impl.history().save_checkpoint(url, position_ms, duration_ms) end)
+        # Presence needs the same pair, but as a stage rather than a checkpoint:
+        # the checkpoint event is a *decision* about resume (and becomes
+        # `:clear_checkpoint` near the end), while this is the raw position and
+        # duration. Both ride the same callback; the runtime routes them apart.
+        send(parent, {:play_progress, playback_ref, {:position, position_ms, duration_ms}})
 
       :clear_checkpoint ->
         safe_history(fn -> Impl.history().clear_checkpoint(url) end)
@@ -327,6 +338,10 @@ defmodule Playmark.TUI.PlaybackActions do
       resume_position_ms: start_position_ms,
       steps: play_steps(player, local?),
       stage: :starting,
+      # The first position report, kept so later ones do not re-anchor — and so
+      # `nil` unambiguously means "no anchor has arrived". Inside `playing`
+      # rather than as a new top-level key, which the state-ownership test owns.
+      anchor: nil,
       # Whether this player can be asked to quit over a control socket, which is
       # what takeover needs. `:pending` until Control reports (mpv/VLC), `:none`
       # for a player that has no control interface. See seed_control/1.
@@ -336,6 +351,18 @@ defmodule Playmark.TUI.PlaybackActions do
       # Chapter count, filled in from the caption probe's {:chapters, n} report
       # (mpv/VLC with captions on). nil until then / when no probe runs.
       chapters: nil,
+      # Whether this play's card is actually on Discord. Seeded nil, not
+      # `:pending`: `set_playing` is a cast, so nothing here can tell a delivered
+      # card from a dropped one, and a badge drawn from the cast alone would
+      # claim a connection it has never seen. `handle_info/2` fills it in from
+      # the first `{:presence_status, _}` Presence reports — kept inside
+      # `playing`, so it needs no top-level key and nothing clears it.
+      presence: nil,
+      # Whether the player is paused, which the strip badges so a cleared card
+      # cannot be mistaken for presence being switched off. Reported by both
+      # backends that can be controlled (see Playmark.Player.Control); a player
+      # with no control socket never reports one and stays `false`.
+      paused: false,
       origin: origin,
       queue_id: queue_id,
       return_mode: return_mode
@@ -490,6 +517,48 @@ defmodule Playmark.TUI.PlaybackActions do
     {:noreply, maybe_unlock(%{state | playing: %{playing | control: control}})}
   end
 
+  # The card is published here rather than in `start_play/4` because this is the
+  # first moment a backend reports that playback actually began. A cancelled
+  # preparation or a failed launch never reaches it, so a video that never
+  # played is never announced.
+  def handle_progress(
+        {:play_progress, ref, :playing},
+        %{playing: %{ref: ref} = playing} = state
+      ) do
+    publish_presence(playing)
+    {:noreply, maybe_unlock(%{state | playing: %{playing | stage: :playing}})}
+  end
+
+  # The first position report anchors the card's countdown. Later reports are
+  # already folded into `playing` and deliberately do not republish.
+  def handle_progress(
+        {:play_progress, ref, {:position, position_ms, duration_ms}},
+        %{playing: %{ref: ref, anchor: nil} = playing} = state
+      ) do
+    Impl.presence().anchor(position_ms, duration_ms)
+    {:noreply, %{state | playing: %{playing | anchor: {position_ms, duration_ms}}}}
+  end
+
+  def handle_progress(
+        {:play_progress, ref, {:position, _position_ms, _duration_ms}},
+        %{playing: %{ref: ref}} = state
+      ) do
+    {:noreply, state}
+  end
+
+  # A paused video is not being watched, so the card goes away until it resumes.
+  # Both transitions reset the anchor, and that is what makes the resumed bar
+  # restart from where the pause left off rather than from the start of the
+  # video: Control re-reports the position when playback resumes, and only an
+  # unanchored play takes that report (see the `anchor: nil` clause above).
+  def handle_progress(
+        {:play_progress, ref, {:paused, paused?}},
+        %{playing: %{ref: ref} = playing} = state
+      )
+      when is_boolean(paused?) do
+    {:noreply, %{state | playing: paused_presence(playing, paused?)}}
+  end
+
   def handle_progress({:play_progress, ref, stage}, %{playing: %{ref: ref} = playing} = state)
       when is_map(playing) and is_atom(stage) do
     {:noreply, maybe_unlock(%{state | playing: %{playing | stage: stage}})}
@@ -535,6 +604,52 @@ defmodule Playmark.TUI.PlaybackActions do
   defp seed_control(player) when player in [:mpv, :vlc], do: :pending
   defp seed_control(_player), do: :none
 
+  # The card is YouTube-only. A local file's path is not an http(s) URL, so it
+  # fails validation here and clears instead of announcing a filename — which is
+  # also why this one clause covers both "local playback" and "not a YouTube
+  # URL" rather than needing a `local` flag on the playing map.
+  #
+  # The card's URLs are built from what `YouTube` returns, never from the raw
+  # source: `validate/1` is what stands between a played row and a URL sent to
+  # another process, and `video_id/1` re-derives the id by shape rather than
+  # trusting the query string. Nothing here reads the filesystem or the network.
+  defp publish_presence(playing) do
+    case YouTube.validate(playing.url) do
+      {:ok, url} ->
+        Impl.presence().set_playing(%{
+          title: playing.title,
+          author: playing.author,
+          url: url,
+          video_id: YouTube.video_id(url)
+        })
+
+      {:error, _reason} ->
+        Impl.presence().clear()
+    end
+  end
+
+  # Presence for a pause and a resume. Clearing rather than sending a "paused"
+  # activity is deliberate: the card's whole content is the video and its
+  # progress, and there is no paused *state* to render — a card with a frozen
+  # bar would be the same card, claiming the same thing.
+  #
+  # A pause keeps `presence` as it was. It is the strip's only evidence that
+  # there *was* a card to pause, and without it a local file — which never
+  # publishes one — would show a paused badge for a card that never existed.
+  #
+  # A resume clears it, because the republish is in flight and nothing has
+  # confirmed it yet; `publish_presence/1` revalidates the URL and re-derives
+  # the id rather than trusting the card it replaces.
+  defp paused_presence(playing, true) do
+    Impl.presence().clear()
+    %{playing | paused: true, anchor: nil}
+  end
+
+  defp paused_presence(playing, false) do
+    publish_presence(playing)
+    %{playing | paused: false, anchor: nil, presence: nil}
+  end
+
   @doc """
   Commits the external player's exit, called from `Playmark.TUI.handle_info/2`.
 
@@ -548,28 +663,45 @@ defmodule Playmark.TUI.PlaybackActions do
   is not new: `return_mode/2` below already reads `state.queue_return`, and
   advancing the queue already calls `start_play/4` from here. Having both halves
   in one file makes it visible rather than introducing it.
+
+  The presence card is cleared first, and only for a result carrying the ref of
+  the play we think is running: a superseded or cancelled play reports late, and
+  its result must not wipe the card belonging to the player still on screen.
+
+  That clearing is in this wrapper rather than in each clause below so a new way
+  for a play to end cannot forget it — every ending, including a failure, leaves
+  no card behind. The clauses themselves are `do_handle_result/2`, private
+  because a public `handle_result/2` a caller could reach without the guard is
+  the bug this shape exists to prevent.
   """
-  def handle_result(
-        {:play_result, ref, {:ok, :completed}},
-        %{playing: %{ref: ref, origin: :queue}} = state
-      ) do
+  def handle_result({:play_result, ref, _result} = msg, %{playing: %{ref: ref}} = state) do
+    Impl.presence().clear()
+    do_handle_result(msg, state)
+  end
+
+  def handle_result({:play_result, _ref, _result} = msg, state), do: do_handle_result(msg, state)
+
+  defp do_handle_result(
+         {:play_result, ref, {:ok, :completed}},
+         %{playing: %{ref: ref, origin: :queue}} = state
+       ) do
     {:noreply, complete_queued_play(state)}
   end
 
   # ffplay has no stable position/end-reason API, so retain its historical clean
   # exit behavior: an unknown clean exit advances the queue.
-  def handle_result(
-        {:play_result, ref, {:ok, :unknown}},
-        %{playing: %{ref: ref, origin: :queue, player: :ffplay}} = state
-      ) do
+  defp do_handle_result(
+         {:play_result, ref, {:ok, :unknown}},
+         %{playing: %{ref: ref, origin: :queue, player: :ffplay}} = state
+       ) do
     {:noreply, complete_queued_play(state)}
   end
 
-  def handle_result(
-        {:play_result, ref, {:ok, reason}},
-        %{playing: %{ref: ref, origin: :queue}} = state
-      )
-      when reason in [:stopped, :unknown] do
+  defp do_handle_result(
+         {:play_result, ref, {:ok, reason}},
+         %{playing: %{ref: ref, origin: :queue}} = state
+       )
+       when reason in [:stopped, :unknown] do
     {:noreply,
      %{
        state
@@ -580,11 +712,11 @@ defmodule Playmark.TUI.PlaybackActions do
      }}
   end
 
-  def handle_result(
-        {:play_result, ref, {:ok, reason}},
-        %{playing: %{ref: ref}} = state
-      )
-      when reason in [:completed, :stopped, :unknown] do
+  defp do_handle_result(
+         {:play_result, ref, {:ok, reason}},
+         %{playing: %{ref: ref}} = state
+       )
+       when reason in [:completed, :stopped, :unknown] do
     {:noreply, %{state | mode: play_return_mode(state), playing: nil, status: nil}}
   end
 
@@ -592,10 +724,10 @@ defmodule Playmark.TUI.PlaybackActions do
   # item in place so it is visible where playback stopped. The mode returns to
   # where browsing was rather than forcing the queue modal open — playback is a
   # background activity now, and popping a modal would interrupt the user.
-  def handle_result(
-        {:play_result, ref, {:error, reason}},
-        %{playing: %{ref: ref, origin: :queue}} = state
-      ) do
+  defp do_handle_result(
+         {:play_result, ref, {:error, reason}},
+         %{playing: %{ref: ref, origin: :queue}} = state
+       ) do
     Logger.error("Playback failed: #{reason}")
 
     {:noreply,
@@ -608,10 +740,10 @@ defmodule Playmark.TUI.PlaybackActions do
      }}
   end
 
-  def handle_result(
-        {:play_result, ref, {:error, reason}},
-        %{playing: %{ref: ref}} = state
-      ) do
+  defp do_handle_result(
+         {:play_result, ref, {:error, reason}},
+         %{playing: %{ref: ref}} = state
+       ) do
     Logger.error("Playback failed: #{reason}")
 
     {:noreply,
@@ -623,7 +755,7 @@ defmodule Playmark.TUI.PlaybackActions do
      }}
   end
 
-  def handle_result({:play_result, _ref, _result}, state), do: {:noreply, state}
+  defp do_handle_result({:play_result, _ref, _result}, state), do: {:noreply, state}
 
   defp complete_queued_play(%{playing: %{queue_id: id} = playing} = state) do
     Queue.remove_by_id(id)

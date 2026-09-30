@@ -119,4 +119,43 @@ defmodule Playmark.YouTubeTest do
       assert {:error, _} = YouTube.canonical_playlist_url(nil)
     end
   end
+
+  describe "video_id/1" do
+    test "extracts the id from a canonical watch URL" do
+      assert YouTube.video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    end
+
+    test "ignores extra query parameters around the id" do
+      assert YouTube.video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s&list=PL1") ==
+               "dQw4w9WgXcQ"
+    end
+
+    test "extracts the id from a short link" do
+      assert YouTube.video_id("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    end
+
+    test "ignores a short link's own query string" do
+      assert YouTube.video_id("https://youtu.be/dQw4w9WgXcQ?t=42") == "dQw4w9WgXcQ"
+    end
+
+    test "returns nil for URLs that are not videos" do
+      assert YouTube.video_id("https://www.youtube.com/@SomeChannel") == nil
+      assert YouTube.video_id("https://www.youtube.com/playlist?list=PL1") == nil
+      assert YouTube.video_id("https://www.youtube.com/") == nil
+    end
+
+    test "returns nil for an id of the wrong shape" do
+      assert YouTube.video_id("https://www.youtube.com/watch?v=tooshort") == nil
+      assert YouTube.video_id("https://www.youtube.com/watch?v=waaaaaaytoolongforanid") == nil
+      assert YouTube.video_id("https://www.youtube.com/watch?v=") == nil
+      assert YouTube.video_id("https://www.youtube.com/watch?v=has spaces!!") == nil
+    end
+
+    test "returns nil for a non-YouTube host or junk" do
+      assert YouTube.video_id("https://vimeo.com/12345678") == nil
+      assert YouTube.video_id("/home/user/video.mkv") == nil
+      assert YouTube.video_id("not a url") == nil
+      assert YouTube.video_id(nil) == nil
+    end
+  end
 end
