@@ -171,17 +171,6 @@ defmodule Playmark.Player.Control do
     end
   end
 
-  # Asks a running player to exit cleanly over its control socket. A nil socket
-  # (never connected, or dropped mid-play) is a no-op, and a failed send is
-  # swallowed — a stop request must never crash the monitor loop, because the port
-  # exit is what actually ends playback either way.
-  #
-  # The two players want different words, and VLC's is the non-obvious one. Its RC
-  # `quit` ends the *control session*, not the player: measured against VLC 3.0.23,
-  # `quit` left the process playing indefinitely and merely dropped the socket
-  # (which then reported {:control, :none}, so takeover silently stopped working),
-  # while `shutdown` exited it in 6ms. mpv's IPC `quit` does exit mpv (5ms), so it
-  # keeps the obvious spelling.
   # Whether a position sample has jumped away from where the previous one says
   # it should be — a seek rather than playback advancing.
   #
@@ -205,6 +194,17 @@ defmodule Playmark.Player.Control do
     abs(position_ms - expected) > @seek_tolerance_ms
   end
 
+  # Asks a running player to exit cleanly over its control socket. A nil socket
+  # (never connected, or dropped mid-play) is a no-op, and a failed send is
+  # swallowed — a stop request must never crash the monitor loop, because the port
+  # exit is what actually ends playback either way.
+  #
+  # The two players want different words, and VLC's is the non-obvious one. Its RC
+  # `quit` ends the *control session*, not the player: measured against VLC 3.0.23,
+  # `quit` left the process playing indefinitely and merely dropped the socket
+  # (which then reported {:control, :none}, so takeover silently stopped working),
+  # while `shutdown` exited it in 6ms. mpv's IPC `quit` does exit mpv (5ms), so it
+  # keeps the obvious spelling.
   @doc false
   def request_quit(_kind, nil), do: :ok
 
