@@ -372,7 +372,12 @@ defmodule Playmark.Player.Control do
   defp handle_control_line(%{kind: :mpv} = state, line) do
     case parse_mpv_line(line) do
       {:position, position_ms} ->
-        state |> Map.put(:position_ms, position_ms) |> maybe_checkpoint(false)
+        # Observed before the checkpoint, not after: a seek must be reported as
+        # soon as it is seen rather than held behind one that is not due.
+        state
+        |> Map.put(:position_ms, position_ms)
+        |> observe_position()
+        |> maybe_checkpoint(false)
 
       {:duration, duration_ms} ->
         state |> Map.put(:duration_ms, duration_ms) |> maybe_checkpoint(false)
