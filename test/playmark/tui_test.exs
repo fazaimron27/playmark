@@ -975,6 +975,18 @@ defmodule Playmark.TUITest do
       assert state.mode == :playing
       assert state.playing.control == :pending
     end
+
+    test "a seek that arrives after playback ended is ignored" do
+      stub_presence()
+      pid = start_tui()
+
+      # No play is running, so `playing` is nil: the new clause's pattern must
+      # not match its way into a KeyError. `progress/3` reads the state back, so
+      # a crash here fails the test rather than passing quietly.
+      progress(pid, make_ref(), {:seek, 600_000, 300_000})
+
+      refute_receive {TestPresence, :anchor, 600_000, _duration}, 100
+    end
   end
 
   describe "taking over a running player" do
@@ -5626,6 +5638,61 @@ defmodule Playmark.TUITest do
       # would jump backwards every ten seconds.
       send(play_task, {:progress, {:checkpoint, 55_000, 300_000}})
       refute_receive {TestPresence, :anchor, 55_000, _duration}, 100
+
+      send(play_task, :close)
+    end
+
+    test "re-anchors the card when the player reports a seek" do
+      stub_presence()
+      stub_playback()
+
+      Repo.insert!(%Bookmark{url: "https://youtu.be/dQw4w9WgXcQ", title: "V", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPresence, :set_playing, _card}, 1_000
+
+      send(play_task, {:progress, {:checkpoint, 45_000, 300_000}})
+      assert_receive {TestPresence, :anchor, 45_000, 300_000}, 1_000
+
+      # A seek arrives as its own stage, through the same closure that turns a
+      # checkpoint into a position report. It is the one thing that may
+      # re-anchor: Discord draws the bar from the card's endpoints, and only
+      # Control can tell a seek from a stale sample.
+      send(play_task, {:progress, {:seek, 600_000, 300_000}})
+      assert_receive {TestPresence, :anchor, 600_000, 300_000}, 1_000
+
+      # Still anchored. The position report that follows a seek must not anchor
+      # again, or the next stale sample would drag the bar backwards.
+      send(play_task, {:progress, {:checkpoint, 610_000, 300_000}})
+      refute_receive {TestPresence, :anchor, 610_000, _duration}, 100
+
+      send(play_task, :close)
+    end
+
+    test "a seek while paused does not re-anchor a cleared card" do
+      stub_presence()
+      stub_playback()
+
+      Repo.insert!(%Bookmark{url: "https://youtu.be/dQw4w9WgXcQ", title: "V", channel: "C"})
+      pid = start_tui()
+
+      press(pid, "enter")
+      assert_receive {TestPlayback, play_task}, 1_000
+      assert_receive {TestPresence, :set_playing, _card}, 1_000
+
+      send(play_task, {:progress, {:paused, true}})
+      assert_receive {TestPresence, :clear}, 1_000
+
+      # Seeking while paused is a real thing to do. The TUI sends it like any
+      # other — the card was taken down on pause, and it is `Presence.anchor/2`
+      # that ignores a cast with no card set (presence_test.exs:216). What must
+      # not happen is the card coming back up before playback resumes.
+      send(play_task, {:progress, {:seek, 600_000, 300_000}})
+      assert_receive {TestPresence, :anchor, 600_000, 300_000}, 1_000
+
+      refute_receive {TestPresence, :set_playing, _card}, 100
 
       send(play_task, :close)
     end

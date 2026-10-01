@@ -64,6 +64,13 @@ defmodule Playmark.Player.Control do
   @connect_timeout_ms 5_000
   @connect_retry_ms 100
   @checkpoint_interval_ms 10_000
+
+  # How far a sample may miss the prediction before it counts as a seek. Two
+  # seconds absorbs socket and poll jitter — a VLC sample is timestamped two
+  # round-trips after its position was read — while still catching a small
+  # deliberate seek. Inherited from cliamp-plugin-discord-rpc's equivalent,
+  # which uses the same figure against real players.
+  @seek_tolerance_ms 2_000
   @minimum_position_ms 10_000
   @completion_window_ms 30_000
   @max_error_output 8_192
@@ -164,6 +171,29 @@ defmodule Playmark.Player.Control do
     end
   end
 
+  # Whether a position sample has jumped away from where the previous one says
+  # it should be — a seek rather than playback advancing.
+  #
+  # Predict, then compare. `maybe_checkpoint/2` emits at most one sample per 10s
+  # of movement, so a sample can be ten seconds stale; comparing a sample to the
+  # previous *sample* would call that stale, and a bar re-anchored from it would
+  # walk backwards every ten seconds. Comparing it to where the previous sample
+  # says playback has reached *by now* does not: a stale sample is exactly what
+  # the prediction describes, and a seek is the one thing that misses it —
+  # however small, including a backwards seek too small to produce a sample of
+  # its own.
+  @doc false
+  def discontinuity?(nil, _position_ms, _observed_at), do: false
+
+  def discontinuity?(
+        %{position_ms: last_position, observed_at: last_observed},
+        position_ms,
+        observed_at
+      ) do
+    expected = last_position + max(observed_at - last_observed, 0)
+    abs(position_ms - expected) > @seek_tolerance_ms
+  end
+
   # Asks a running player to exit cleanly over its control socket. A nil socket
   # (never connected, or dropped mid-play) is a no-op, and a failed send is
   # swallowed — a stop request must never crash the monitor loop, because the port
@@ -214,6 +244,7 @@ defmodule Playmark.Player.Control do
       pending: nil,
       poll_ref: nil,
       last_checkpoint_ms: nil,
+      last_sample: nil,
       output: "",
       opts: opts
     }
@@ -341,7 +372,12 @@ defmodule Playmark.Player.Control do
   defp handle_control_line(%{kind: :mpv} = state, line) do
     case parse_mpv_line(line) do
       {:position, position_ms} ->
-        state |> Map.put(:position_ms, position_ms) |> maybe_checkpoint(false)
+        # Observed before the checkpoint, not after: a seek must be reported as
+        # soon as it is seen rather than held behind one that is not due.
+        state
+        |> Map.put(:position_ms, position_ms)
+        |> observe_position()
+        |> maybe_checkpoint(false)
 
       {:duration, duration_ms} ->
         state |> Map.put(:duration_ms, duration_ms) |> maybe_checkpoint(false)
@@ -369,12 +405,20 @@ defmodule Playmark.Player.Control do
   # This clause sits above the position one deliberately: that clause matches any
   # pending step, so below it this state reply would be swallowed by its `_other`
   # arm and never parsed.
+  #
+  # The position sample is taken here, at the end of the cycle, rather than where
+  # the position arrives: `get_length` answers one line later, so at the position
+  # step the duration is still the previous cycle's. By the time the `status`
+  # line ends the cycle both are this cycle's, and consecutive observations are
+  # then a uniform `@poll_interval_ms` apart — which is what the drift test
+  # interpolates over.
   defp handle_control_line(%{kind: :vlc, pending: :state} = state, line) do
     case parse_vlc_state(line) do
       {:ok, state_name} ->
         state
         |> report_vlc_state(state_name)
         |> maybe_checkpoint(resumed?(state, state_name))
+        |> observe_position()
         |> Map.put(:pending, nil)
         |> schedule_poll(@poll_interval_ms)
 
@@ -471,6 +515,31 @@ defmodule Playmark.Player.Control do
     Process.send_after(self(), {:control_poll, ref}, delay)
     %{state | poll_ref: ref}
   end
+
+  # Records a position sample and reports it as a discontinuity when it does not
+  # match where the previous sample says playback should be.
+  #
+  # A sample is only taken when the duration is known and non-zero: a bar needs
+  # both ends, and a live stream has no end to draw. A missing position (mpv
+  # reports `time-pos` as null around a seek) leaves the previous sample in
+  # place, so the next real sample still compares against the position before
+  # the gap.
+  #
+  # Public and `@doc false` for the same reason `parse_vlc_state/1` is: it is the
+  # testable core of a private clause that a live socket drives.
+  @doc false
+  def observe_position(%{position_ms: position, duration_ms: duration} = state)
+      when is_integer(position) and is_integer(duration) and duration > 0 do
+    observed_at = monotonic_ms()
+
+    if discontinuity?(state.last_sample, position, observed_at) do
+      Playmark.Player.Playback.report(state.opts, {:seek, position, duration})
+    end
+
+    %{state | last_sample: %{position_ms: position, observed_at: observed_at}}
+  end
+
+  def observe_position(state), do: state
 
   defp maybe_checkpoint(state, force?) do
     with true <- state.seekable,

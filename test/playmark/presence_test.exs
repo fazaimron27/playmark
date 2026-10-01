@@ -185,7 +185,7 @@ defmodule Playmark.PresenceTest do
     refute_receive {:client, :set_activity, _second}, 100
   end
 
-  test "re-anchors the countdown once, and later anchors do not republish" do
+  test "re-anchors the countdown from the first position report" do
     pid = start(refresh_ms: 60_000)
     set_playing(pid, @card)
     assert_receive {:client, :set_activity, _first}, 500
@@ -194,12 +194,40 @@ defmodule Playmark.PresenceTest do
 
     assert_receive {:client, :set_activity, activity}, 500
     assert activity["timestamps"]["end"] - activity["timestamps"]["start"] == 300_000
+  end
 
-    # The card already carries this anchor; the TUI sends only one, and the
-    # process does not depend on that.
-    anchor(pid, 40_000, 300_000)
+  test "a re-anchor at a new position republishes, moving the bar" do
+    # A seek. Same video, new position: the bar only moves if this write goes
+    # out, and the key now carries the anchor, so it does.
+    pid = start(refresh_ms: 60_000)
+    set_playing(pid, @card)
+    assert_receive {:client, :set_activity, _first}, 500
 
-    refute_receive {:client, :set_activity, _again}, 100
+    anchor(pid, 30_000, 300_000)
+    assert_receive {:client, :set_activity, anchored}, 500
+
+    anchor(pid, 600_000, 300_000)
+
+    assert_receive {:client, :set_activity, sought}, 500
+
+    # `start_ms` is `now - position`, so a later position is an earlier start.
+    # The difference here is ten minutes, which no millisecond of jitter hides.
+    assert sought["timestamps"]["start"] < anchored["timestamps"]["start"]
+    assert sought["timestamps"]["end"] - sought["timestamps"]["start"] == 300_000
+  end
+
+  test "a re-anchor displaces the keepalive rather than adding a write" do
+    pid = start(refresh_ms: 60_000)
+    set_playing(pid, @card)
+    assert_receive {:client, :set_activity, _first}, 500
+
+    anchor(pid, 600_000, 300_000)
+    assert_receive {:client, :set_activity, _sought}, 500
+
+    # One write for the seek. `do_publish/2` re-arms the refresh timer after
+    # every successful write, so the seek has taken the keepalive's slot rather
+    # than racing it.
+    refute_receive {:client, :set_activity, _extra}, 100
   end
 
   test "a different video republishes even inside the refresh window" do

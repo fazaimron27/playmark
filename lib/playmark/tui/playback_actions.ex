@@ -546,6 +546,29 @@ defmodule Playmark.TUI.PlaybackActions do
     {:noreply, state}
   end
 
+  # A seek is the one thing besides the first report that may move the anchor.
+  # Discord draws the bar from the card's two endpoints and ticks it locally, so
+  # a seek is invisible until the activity is re-sent — and only Control can see
+  # it, because a backwards jump shorter than the checkpoint throttle produces no
+  # position report at all.
+  #
+  # `playing.anchor` is deliberately left as it is. The position reports that
+  # follow a seek carry the anchor this play already has, and those must keep
+  # being ignored: the seek already moved the bar, and a later stale sample must
+  # not drag it back.
+  #
+  # Control reports a discontinuity only when it has both a position and a
+  # duration, so the guard is about this clause's contract rather than a live
+  # possibility: `Presence.anchor/2` raises on a nil duration.
+  def handle_progress(
+        {:play_progress, ref, {:seek, position_ms, duration_ms}},
+        %{playing: %{ref: ref}} = state
+      )
+      when is_integer(position_ms) and is_integer(duration_ms) do
+    Impl.presence().anchor(position_ms, duration_ms)
+    {:noreply, state}
+  end
+
   # A paused video is not being watched, so the card goes away until it resumes.
   # Both transitions reset the anchor, and that is what makes the resumed bar
   # restart from where the pause left off rather than from the start of the

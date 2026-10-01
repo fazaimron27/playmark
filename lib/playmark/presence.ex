@@ -291,7 +291,7 @@ defmodule Playmark.Presence do
   defp publish(%{card: nil} = state), do: state
 
   defp publish(state) do
-    key = {identity(state.card), anchored?(state.card)}
+    key = {identity(state.card), anchor_of(state.card)}
 
     if state.conn != nil and key == state.published and fresh?(state) do
       # The card is already live and fresh, so nothing goes out — but the badge
@@ -348,15 +348,27 @@ defmodule Playmark.Presence do
   end
 
   # What the card is *about*. Deliberately excludes the anchor's `start_ms`:
-  # `set_playing/1` and `anchor/2` both recompute it from the clock, so a key
-  # containing it would differ on every report and the skip in `publish/1`
-  # would never once fire.
+  # `set_playing/1` recomputes it from the clock on every call, so a key
+  # containing it would differ for two identical sets and the skip in
+  # `publish/1` would never once fire. The anchor rides in its own component
+  # below instead — where a change is the one thing that *must* re-key.
   defp identity(card), do: {card.title, card.author, card.url, card.video_id}
 
-  # The one timestamp-derived fact that does belong in the key: it is what lets
-  # the *first* anchor republish and every later one for the same video be
-  # ignored, without relying on the TUI to send only one.
-  defp anchored?(card), do: is_integer(card.duration_ms)
+  # The anchor, as far as the key is concerned: `nil` until a position report
+  # anchors the card, then the real pair. So the first anchor republishes, and
+  # so does every later one that lands somewhere else — which is what corrects
+  # the bar after a seek, since Discord draws it from these two endpoints and
+  # ticks it locally.
+  #
+  # Unanchored is `nil` rather than `{start_ms, nil}` for the reason `identity/1`
+  # gives: `set_playing/1` puts a clock-derived `start_ms` on the card, and a key
+  # carrying it would republish on a repeated set. Once an anchor exists there is
+  # a real position behind the timestamp.
+  defp anchor_of(%{duration_ms: duration} = card) when is_integer(duration) do
+    {card.start_ms, duration}
+  end
+
+  defp anchor_of(_card), do: nil
 
   defp now_ms, do: System.system_time(:millisecond)
 

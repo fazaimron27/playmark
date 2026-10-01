@@ -72,6 +72,150 @@ defmodule Playmark.Player.ControlTest do
     end
   end
 
+  describe "discontinuity?/3" do
+    # A sample is `%{position_ms: position, observed_at: monotonic_ms}`. These are
+    # synthetic on purpose: the function compares a prediction against an
+    # observation and never touches a player, the same treatment
+    # `parse_vlc_state/1` gets.
+
+    test "the first sample is not a discontinuity" do
+      # There is nothing to compare against. This is what lets a play anchor
+      # without announcing a seek it cannot know about.
+      refute Control.discontinuity?(nil, 45_000, 1_000_000)
+    end
+
+    test "a natural advance keeps the anchor, however stale the sample" do
+      # The case the `anchor: nil` guard in PlaybackActions existed for:
+      # `maybe_checkpoint/2` emits one sample per 10s of movement at most, so a
+      # sample can be ten seconds old. That is not a jump — it is exactly what
+      # the interpolation predicts.
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      refute Control.discontinuity?(last, 55_000, 1_010_000)
+    end
+
+    test "a forward jump is a discontinuity" do
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      assert Control.discontinuity?(last, 645_000, 1_005_000)
+    end
+
+    test "a backwards jump smaller than the reporting throttle is a discontinuity" do
+      # The case that puts this test in Control at all. The positions either side
+      # are 45_000 and 40_000 — a 5s backward seek, well under the 10s
+      # `checkpoint_due?/2` requires — so `maybe_checkpoint/2` emits no
+      # `{:checkpoint, …}` at all. Nothing downstream can recover an event that
+      # was never sent.
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      assert Control.discontinuity?(last, 40_000, 1_005_000)
+    end
+
+    test "scheduling jitter is not a discontinuity" do
+      # The sample landed slightly early and the position sits slightly behind
+      # the prediction. Both are inside the tolerance.
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      refute Control.discontinuity?(last, 44_200, 1_000_900)
+    end
+
+    test "the tolerance boundary keeps the anchor" do
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      # Exactly 2s off the prediction is still within it — `>` rather than `>=`,
+      # so the comparison is "further than the tolerance", not "at least".
+      refute Control.discontinuity?(last, 47_000, 1_000_000)
+      assert Control.discontinuity?(last, 47_001, 1_000_000)
+    end
+
+    test "an out-of-order observation is not a jump forwards" do
+      # `max(elapsed, 0)`: a sample stamped before its predecessor must not push
+      # the prediction past the position and fire.
+      last = %{position_ms: 45_000, observed_at: 1_010_000}
+
+      refute Control.discontinuity?(last, 45_000, 1_000_000)
+    end
+  end
+
+  describe "observe_position/1" do
+    # Only the fields `observe_position/1` reads are present; `Playback.report/2`
+    # takes a bare `%{progress: fun}` map, so no real run/4 state is needed.
+    defp sample_state(overrides, test_pid) do
+      Map.merge(
+        %{
+          position_ms: 45_000,
+          duration_ms: 300_000,
+          last_sample: nil,
+          opts: %{progress: fn stage -> send(test_pid, {:reported, stage}) end}
+        },
+        overrides
+      )
+    end
+
+    defp last_sample(position_ms) do
+      %{position_ms: position_ms, observed_at: System.monotonic_time(:millisecond)}
+    end
+
+    test "records the first sample without reporting it" do
+      state = Control.observe_position(sample_state(%{}, self()))
+
+      assert state.last_sample.position_ms == 45_000
+      refute_received {:reported, _stage}
+    end
+
+    test "reports a seek through the progress callback" do
+      previous = last_sample(45_000)
+
+      state =
+        Control.observe_position(
+          sample_state(%{position_ms: 645_000, last_sample: previous}, self())
+        )
+
+      assert_received {:reported, {:seek, 645_000, 300_000}}
+      assert state.last_sample.position_ms == 645_000
+      assert state.last_sample.observed_at >= previous.observed_at
+    end
+
+    test "does not report a natural advance" do
+      Control.observe_position(
+        sample_state(%{position_ms: 45_100, last_sample: last_sample(45_000)}, self())
+      )
+
+      refute_received {:reported, _stage}
+    end
+
+    test "ignores a sample with no position" do
+      # mpv reports `time-pos: null` around a seek, which `milliseconds/1` turns
+      # into nil. That must not clobber the previous sample: the next real
+      # sample's comparison is against the position before the gap.
+      previous = last_sample(45_000)
+
+      state =
+        Control.observe_position(sample_state(%{position_ms: nil, last_sample: previous}, self()))
+
+      refute_received {:reported, _stage}
+      assert state.last_sample == previous
+    end
+
+    test "ignores a stream with no usable duration" do
+      # VLC answers `get_length` with 0 on a live stream. A bar needs both ends,
+      # and `Presence.anchor/2` is guarded on an integer duration — reporting one
+      # from here would raise in the TUI process.
+      state =
+        Control.observe_position(
+          sample_state(
+            %{position_ms: 645_000, duration_ms: 0, last_sample: last_sample(45_000)},
+            self()
+          )
+        )
+
+      refute_received {:reported, _stage}
+
+      # The sample was not recorded either, so nothing was compared against it.
+      assert state.last_sample.position_ms == 45_000
+    end
+  end
+
   describe "request_quit/2" do
     setup do
       {:ok, listener} =
