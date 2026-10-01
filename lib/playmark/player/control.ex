@@ -244,6 +244,7 @@ defmodule Playmark.Player.Control do
       pending: nil,
       poll_ref: nil,
       last_checkpoint_ms: nil,
+      last_sample: nil,
       output: "",
       opts: opts
     }
@@ -399,12 +400,20 @@ defmodule Playmark.Player.Control do
   # This clause sits above the position one deliberately: that clause matches any
   # pending step, so below it this state reply would be swallowed by its `_other`
   # arm and never parsed.
+  #
+  # The position sample is taken here, at the end of the cycle, rather than where
+  # the position arrives: `get_length` answers one line later, so at the position
+  # step the duration is still the previous cycle's. By the time the `status`
+  # line ends the cycle both are this cycle's, and consecutive observations are
+  # then a uniform `@poll_interval_ms` apart — which is what the drift test
+  # interpolates over.
   defp handle_control_line(%{kind: :vlc, pending: :state} = state, line) do
     case parse_vlc_state(line) do
       {:ok, state_name} ->
         state
         |> report_vlc_state(state_name)
         |> maybe_checkpoint(resumed?(state, state_name))
+        |> observe_position()
         |> Map.put(:pending, nil)
         |> schedule_poll(@poll_interval_ms)
 
@@ -501,6 +510,31 @@ defmodule Playmark.Player.Control do
     Process.send_after(self(), {:control_poll, ref}, delay)
     %{state | poll_ref: ref}
   end
+
+  # Records a position sample and reports it as a discontinuity when it does not
+  # match where the previous sample says playback should be.
+  #
+  # A sample is only taken when the duration is known and non-zero: a bar needs
+  # both ends, and a live stream has no end to draw. A missing position (mpv
+  # reports `time-pos` as null around a seek) leaves the previous sample in
+  # place, so the next real sample still compares against the position before
+  # the gap.
+  #
+  # Public and `@doc false` for the same reason `parse_vlc_state/1` is: it is the
+  # testable core of a private clause that a live socket drives.
+  @doc false
+  def observe_position(%{position_ms: position, duration_ms: duration} = state)
+      when is_integer(position) and is_integer(duration) and duration > 0 do
+    observed_at = monotonic_ms()
+
+    if discontinuity?(state.last_sample, position, observed_at) do
+      Playmark.Player.Playback.report(state.opts, {:seek, position, duration})
+    end
+
+    %{state | last_sample: %{position_ms: position, observed_at: observed_at}}
+  end
+
+  def observe_position(state), do: state
 
   defp maybe_checkpoint(state, force?) do
     with true <- state.seekable,
