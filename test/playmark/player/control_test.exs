@@ -72,6 +72,71 @@ defmodule Playmark.Player.ControlTest do
     end
   end
 
+  describe "discontinuity?/3" do
+    # A sample is `%{position_ms: position, observed_at: monotonic_ms}`. These are
+    # synthetic on purpose: the function compares a prediction against an
+    # observation and never touches a player, the same treatment
+    # `parse_vlc_state/1` gets.
+
+    test "the first sample is not a discontinuity" do
+      # There is nothing to compare against. This is what lets a play anchor
+      # without announcing a seek it cannot know about.
+      refute Control.discontinuity?(nil, 45_000, 1_000_000)
+    end
+
+    test "a natural advance keeps the anchor, however stale the sample" do
+      # The case the `anchor: nil` guard in PlaybackActions existed for:
+      # `maybe_checkpoint/2` emits one sample per 10s of movement at most, so a
+      # sample can be ten seconds old. That is not a jump — it is exactly what
+      # the interpolation predicts.
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      refute Control.discontinuity?(last, 55_000, 1_010_000)
+    end
+
+    test "a forward jump is a discontinuity" do
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      assert Control.discontinuity?(last, 645_000, 1_005_000)
+    end
+
+    test "a backwards jump smaller than the reporting throttle is a discontinuity" do
+      # The case that puts this test in Control at all. The positions either side
+      # are 45_000 and 40_000 — a 5s backward seek, well under the 10s
+      # `checkpoint_due?/2` requires — so `maybe_checkpoint/2` emits no
+      # `{:checkpoint, …}` at all. Nothing downstream can recover an event that
+      # was never sent.
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      assert Control.discontinuity?(last, 40_000, 1_005_000)
+    end
+
+    test "scheduling jitter is not a discontinuity" do
+      # The sample landed slightly early and the position sits slightly behind
+      # the prediction. Both are inside the tolerance.
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      refute Control.discontinuity?(last, 44_200, 1_000_900)
+    end
+
+    test "the tolerance boundary keeps the anchor" do
+      last = %{position_ms: 45_000, observed_at: 1_000_000}
+
+      # Exactly 2s off the prediction is still within it — `>` rather than `>=`,
+      # so the comparison is "further than the tolerance", not "at least".
+      refute Control.discontinuity?(last, 47_000, 1_000_000)
+      assert Control.discontinuity?(last, 47_001, 1_000_000)
+    end
+
+    test "an out-of-order observation is not a jump forwards" do
+      # `max(elapsed, 0)`: a sample stamped before its predecessor must not push
+      # the prediction past the position and fire.
+      last = %{position_ms: 45_000, observed_at: 1_010_000}
+
+      refute Control.discontinuity?(last, 45_000, 1_000_000)
+    end
+  end
+
   describe "request_quit/2" do
     setup do
       {:ok, listener} =

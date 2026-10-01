@@ -64,6 +64,13 @@ defmodule Playmark.Player.Control do
   @connect_timeout_ms 5_000
   @connect_retry_ms 100
   @checkpoint_interval_ms 10_000
+
+  # How far a sample may miss the prediction before it counts as a seek. Two
+  # seconds absorbs socket and poll jitter — a VLC sample is timestamped two
+  # round-trips after its position was read — while still catching a small
+  # deliberate seek. Inherited from cliamp-plugin-discord-rpc's equivalent,
+  # which uses the same figure against real players.
+  @seek_tolerance_ms 2_000
   @minimum_position_ms 10_000
   @completion_window_ms 30_000
   @max_error_output 8_192
@@ -175,6 +182,29 @@ defmodule Playmark.Player.Control do
   # (which then reported {:control, :none}, so takeover silently stopped working),
   # while `shutdown` exited it in 6ms. mpv's IPC `quit` does exit mpv (5ms), so it
   # keeps the obvious spelling.
+  # Whether a position sample has jumped away from where the previous one says
+  # it should be — a seek rather than playback advancing.
+  #
+  # Predict, then compare. `maybe_checkpoint/2` emits at most one sample per 10s
+  # of movement, so a sample can be ten seconds stale; comparing a sample to the
+  # previous *sample* would call that stale, and a bar re-anchored from it would
+  # walk backwards every ten seconds. Comparing it to where the previous sample
+  # says playback has reached *by now* does not: a stale sample is exactly what
+  # the prediction describes, and a seek is the one thing that misses it —
+  # however small, including a backwards seek too small to produce a sample of
+  # its own.
+  @doc false
+  def discontinuity?(nil, _position_ms, _observed_at), do: false
+
+  def discontinuity?(
+        %{position_ms: last_position, observed_at: last_observed},
+        position_ms,
+        observed_at
+      ) do
+    expected = last_position + max(observed_at - last_observed, 0)
+    abs(position_ms - expected) > @seek_tolerance_ms
+  end
+
   @doc false
   def request_quit(_kind, nil), do: :ok
 
